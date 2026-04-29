@@ -1,5 +1,6 @@
 // /src/services/course.service.ts
 
+import { randomInt } from "crypto";
 import { ObjectId } from "mongodb";
 import {
 	CourseDTO,
@@ -12,6 +13,26 @@ import {
 } from "../dto/courses.dto";
 import { initCourseCollection, getCourseCollection } from "../models/course.model";
 import { connectToDatabase } from "../utils/mongo";
+
+const slugify = (value: string): string =>
+	value
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "");
+
+const ALPHANUMERIC_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+const getCourseInitials = (title: string): string => {
+	const words = title.match(/[A-Za-z0-9]+/g) ?? [];
+	const initials = words.map((word) => word[0]?.toUpperCase() ?? "").join("");
+	return initials || "CRS";
+};
+
+const generateRandomAlphaNumeric = (length: number): string =>
+	Array.from({ length }, () => ALPHANUMERIC_CHARS[randomInt(0, ALPHANUMERIC_CHARS.length)]).join("");
+
+const buildCourseIdFromTitle = (title: string): string => `${getCourseInitials(title)}-${generateRandomAlphaNumeric(6)}`;
 
 const clampRating = (rating: number): number => {
 	if (Number.isNaN(rating)) return 5;
@@ -48,15 +69,20 @@ const calculateReviewSummary = (reviews: MongoCourseReview[] = []): CourseReview
 	};
 };
 
-const normalizeCoursePayload = (payload: CourseInputDTO): Omit<MongoCourse, "_id"> => {
+const normalizeCoursePayload = (payload: CourseInputDTO, courseId: string): Omit<MongoCourse, "_id"> => {
 	const now = new Date();
 	const reviews = (payload.reviews ?? []).map((review) => normalizeReview(review));
+	const slug = payload.slug ? slugify(payload.slug) : slugify(payload.title);
 
 	return {
 		...payload,
+		courseId,
+		slug,
+		deliveryMode: payload.deliveryMode ?? "online",
+		isSoldOut: payload.isSoldOut ?? false,
 		reviews,
 		reviewSummary: calculateReviewSummary(reviews),
-		units: payload.units.map((unit, unitIndex) => ({
+		units: (payload.units ?? []).map((unit, unitIndex) => ({
 			...unit,
 			order: unit.order ?? unitIndex,
 			videos: unit.videos.map((video, videoIndex) => ({
@@ -86,10 +112,12 @@ const mapMongoReviewToDTO = (review: MongoCourseReview): CourseReviewDTO => ({
 });
 
 const mapMongoCourseToDTO = (course: MongoCourse & { _id: ObjectId }): CourseDTO => ({
-	id: course._id.toHexString(),
+	id: course.courseId ?? course._id.toHexString(),
+	courseId: course.courseId,
 	title: course.title,
+	slug: course.slug,
 	summary: course.summary,
-	level: course.level,
+	target: (course as MongoCourse & { level?: string }).target ?? (course as MongoCourse & { level?: string }).level,
 	category: course.category,
 	tags: course.tags,
 	thumbnailUrl: course.thumbnailUrl,
@@ -102,12 +130,69 @@ const mapMongoCourseToDTO = (course: MongoCourse & { _id: ObjectId }): CourseDTO
 	updatedAt: course.updatedAt,
 });
 
+const generateUniqueCourseId = async (title: string): Promise<string> => {
+	const db = await connectToDatabase();
+	initCourseCollection(db);
+	const courseCollection = getCourseCollection();
+
+	for (let attempt = 0; attempt < 12; attempt += 1) {
+		const candidate = buildCourseIdFromTitle(title);
+		const exists = await courseCollection.findOne(
+			{ courseId: candidate },
+			{
+				projection: { _id: 1 },
+			},
+		);
+		if (!exists) {
+			return candidate;
+		}
+	}
+
+	return `${getCourseInitials(title)}-${generateRandomAlphaNumeric(10)}`;
+};
+
+const findCourseDocumentByIdentifier = async (
+	courseId: string,
+): Promise<(MongoCourse & { _id: ObjectId }) | null> => {
+	const db = await connectToDatabase();
+	initCourseCollection(db);
+	const courseCollection = getCourseCollection();
+
+	const isObjectId = ObjectId.isValid(courseId);
+	const normalizedCourseId = courseId.trim().toLowerCase();
+
+	const course = await courseCollection.findOne(
+		isObjectId
+			? { _id: new ObjectId(courseId) }
+			: {
+					$or: [
+						{ courseId: courseId.toUpperCase() },
+						{ courseId },
+						{ slug: normalizedCourseId },
+						{
+							title: {
+								$regex: `^${normalizedCourseId.replace(/[-\s]+/g, "[-\\s]")}$`,
+								$options: "i",
+							},
+						},
+					],
+				},
+	);
+
+	if (!course || !course._id) {
+		return null;
+	}
+
+	return course as MongoCourse & { _id: ObjectId };
+};
+
 export const createCourse = async (payload: CourseInputDTO): Promise<CourseDTO> => {
 	const db = await connectToDatabase();
 	initCourseCollection(db);
 	const courseCollection = getCourseCollection();
 
-	const normalizedCourse = normalizeCoursePayload(payload);
+	const generatedCourseId = await generateUniqueCourseId(payload.title);
+	const normalizedCourse = normalizeCoursePayload(payload, generatedCourseId);
 	const result = await courseCollection.insertOne(normalizedCourse as MongoCourse);
 
 	const insertedCourse: MongoCourse & { _id: ObjectId } = {
@@ -131,35 +216,20 @@ export const getCourses = async (): Promise<CourseDTO[]> => {
 };
 
 export const getCourseById = async (courseId: string): Promise<CourseDTO | null> => {
-	if (!ObjectId.isValid(courseId)) {
+	const course = await findCourseDocumentByIdentifier(courseId);
+	if (!course) {
 		return null;
 	}
 
-	const db = await connectToDatabase();
-	initCourseCollection(db);
-	const courseCollection = getCourseCollection();
-
-	const course = await courseCollection.findOne({
-		_id: new ObjectId(courseId),
-	});
-
-	if (!course || !course._id) {
-		return null;
-	}
-
-	return mapMongoCourseToDTO(course as MongoCourse & { _id: ObjectId });
+	return mapMongoCourseToDTO(course);
 };
 
 export const addCourseReview = async (courseId: string, payload: CourseReviewInputDTO): Promise<CourseReviewDTO | null> => {
-	if (!ObjectId.isValid(courseId)) {
-		return null;
-	}
-
 	const db = await connectToDatabase();
 	initCourseCollection(db);
 	const courseCollection = getCourseCollection();
 
-	const course = await courseCollection.findOne({ _id: new ObjectId(courseId) });
+	const course = await findCourseDocumentByIdentifier(courseId);
 	if (!course) {
 		return null;
 	}
@@ -170,7 +240,7 @@ export const addCourseReview = async (courseId: string, payload: CourseReviewInp
 	const reviewSummary = calculateReviewSummary(reviews);
 
 	await courseCollection.updateOne(
-		{ _id: new ObjectId(courseId) },
+		{ _id: new ObjectId(course._id) },
 		{
 			$set: {
 				reviews,
@@ -183,8 +253,24 @@ export const addCourseReview = async (courseId: string, payload: CourseReviewInp
 	return mapMongoReviewToDTO(newReview);
 };
 
+export const getCourseReviews = async (
+	courseId: string,
+): Promise<{ reviews: CourseReviewDTO[]; reviewSummary: CourseReviewSummaryDTO } | null> => {
+	const course = await findCourseDocumentByIdentifier(courseId);
+	if (!course) {
+		return null;
+	}
+
+	const reviews = (course.reviews ?? []).map(mapMongoReviewToDTO);
+	return {
+		reviews,
+		reviewSummary: course.reviewSummary ?? calculateReviewSummary(course.reviews),
+	};
+};
+
 export const deleteCourse = async (courseId: string): Promise<boolean> => {
-	if (!ObjectId.isValid(courseId)) {
+	const course = await findCourseDocumentByIdentifier(courseId);
+	if (!course) {
 		return false;
 	}
 
@@ -193,7 +279,7 @@ export const deleteCourse = async (courseId: string): Promise<boolean> => {
 	const courseCollection = getCourseCollection();
 
 	const result = await courseCollection.deleteOne({
-		_id: new ObjectId(courseId),
+		_id: new ObjectId(course._id),
 	});
 
 	return result.deletedCount === 1;

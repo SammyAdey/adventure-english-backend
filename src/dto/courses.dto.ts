@@ -1,6 +1,6 @@
 // /src/dto/courses.dto.ts
 
-export type CourseLevel = "beginner" | "intermediate" | "advanced";
+export type CourseDeliveryMode = "online" | "in_person";
 
 export interface CourseVideoDTO {
 	title: string;
@@ -68,12 +68,18 @@ export interface CourseReviewSummaryDTO {
 
 export interface CourseInputDTO {
 	title: string;
+	slug?: string;
 	summary?: string;
-	level?: CourseLevel;
+	deliveryMode?: CourseDeliveryMode;
+	isSoldOut?: boolean;
+	maxEnrollments?: number;
+	recommendedSessionsPerWeek?: number;
+	sessionCount?: number;
+	target?: string;
 	category?: string;
 	tags?: string[];
 	thumbnailUrl?: string;
-	units: CourseUnitDTO[];
+	units?: CourseUnitDTO[];
 	meta?: CourseMetaDTO;
 	pricing?: CoursePricingDTO;
 	reviews?: CourseReviewInputDTO[];
@@ -81,6 +87,7 @@ export interface CourseInputDTO {
 
 export interface CourseDTO extends CourseInputDTO {
 	id: string;
+	courseId?: string;
 	createdAt: Date;
 	updatedAt: Date;
 	reviews: CourseReviewDTO[];

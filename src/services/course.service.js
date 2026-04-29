@@ -10,10 +10,25 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteCourse = exports.addCourseReview = exports.getCourseById = exports.getCourses = exports.createCourse = void 0;
+exports.deleteCourse = exports.getCourseReviews = exports.addCourseReview = exports.getCourseById = exports.getCourses = exports.createCourse = void 0;
+const crypto_1 = require("crypto");
 const mongodb_1 = require("mongodb");
 const course_model_1 = require("../models/course.model");
 const mongo_1 = require("../utils/mongo");
+const slugify = (value) => value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+const ALPHANUMERIC_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+const getCourseInitials = (title) => {
+    var _a;
+    const words = (_a = title.match(/[A-Za-z0-9]+/g)) !== null && _a !== void 0 ? _a : [];
+    const initials = words.map((word) => { var _a, _b; return (_b = (_a = word[0]) === null || _a === void 0 ? void 0 : _a.toUpperCase()) !== null && _b !== void 0 ? _b : ""; }).join("");
+    return initials || "CRS";
+};
+const generateRandomAlphaNumeric = (length) => Array.from({ length }, () => ALPHANUMERIC_CHARS[(0, crypto_1.randomInt)(0, ALPHANUMERIC_CHARS.length)]).join("");
+const buildCourseIdFromTitle = (title) => `${getCourseInitials(title)}-${generateRandomAlphaNumeric(6)}`;
 const clampRating = (rating) => {
     if (Number.isNaN(rating))
         return 5;
@@ -45,11 +60,13 @@ const calculateReviewSummary = (reviews = []) => {
         positivePercentage: Math.round((positiveCount / ratingCount) * 100),
     };
 };
-const normalizeCoursePayload = (payload) => {
-    var _a;
+const normalizeCoursePayload = (payload, courseId) => {
+    var _a, _b, _c, _d;
     const now = new Date();
     const reviews = ((_a = payload.reviews) !== null && _a !== void 0 ? _a : []).map((review) => normalizeReview(review));
-    return Object.assign(Object.assign({}, payload), { reviews, reviewSummary: calculateReviewSummary(reviews), units: payload.units.map((unit, unitIndex) => {
+    const slug = payload.slug ? slugify(payload.slug) : slugify(payload.title);
+    return Object.assign(Object.assign({}, payload), { courseId,
+        slug, deliveryMode: (_b = payload.deliveryMode) !== null && _b !== void 0 ? _b : "online", isSoldOut: (_c = payload.isSoldOut) !== null && _c !== void 0 ? _c : false, reviews, reviewSummary: calculateReviewSummary(reviews), units: ((_d = payload.units) !== null && _d !== void 0 ? _d : []).map((unit, unitIndex) => {
             var _a, _b;
             return (Object.assign(Object.assign({}, unit), { order: (_a = unit.order) !== null && _a !== void 0 ? _a : unitIndex, videos: unit.videos.map((video, videoIndex) => {
                     var _a, _b;
@@ -70,29 +87,73 @@ const mapMongoReviewToDTO = (review) => {
     });
 };
 const mapMongoCourseToDTO = (course) => {
-    var _a, _b;
+    var _a, _b, _c, _d;
     return ({
-        id: course._id.toHexString(),
+        id: (_a = course.courseId) !== null && _a !== void 0 ? _a : course._id.toHexString(),
+        courseId: course.courseId,
         title: course.title,
+        slug: course.slug,
         summary: course.summary,
-        level: course.level,
+        target: (_b = course.target) !== null && _b !== void 0 ? _b : course.level,
         category: course.category,
         tags: course.tags,
         thumbnailUrl: course.thumbnailUrl,
         units: course.units,
         meta: course.meta,
         pricing: course.pricing,
-        reviews: ((_a = course.reviews) !== null && _a !== void 0 ? _a : []).map(mapMongoReviewToDTO),
-        reviewSummary: (_b = course.reviewSummary) !== null && _b !== void 0 ? _b : calculateReviewSummary(course.reviews),
+        reviews: ((_c = course.reviews) !== null && _c !== void 0 ? _c : []).map(mapMongoReviewToDTO),
+        reviewSummary: (_d = course.reviewSummary) !== null && _d !== void 0 ? _d : calculateReviewSummary(course.reviews),
         createdAt: course.createdAt,
         updatedAt: course.updatedAt,
     });
 };
+const generateUniqueCourseId = (title) => __awaiter(void 0, void 0, void 0, function* () {
+    const db = yield (0, mongo_1.connectToDatabase)();
+    (0, course_model_1.initCourseCollection)(db);
+    const courseCollection = (0, course_model_1.getCourseCollection)();
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+        const candidate = buildCourseIdFromTitle(title);
+        const exists = yield courseCollection.findOne({ courseId: candidate }, {
+            projection: { _id: 1 },
+        });
+        if (!exists) {
+            return candidate;
+        }
+    }
+    return `${getCourseInitials(title)}-${generateRandomAlphaNumeric(10)}`;
+});
+const findCourseDocumentByIdentifier = (courseId) => __awaiter(void 0, void 0, void 0, function* () {
+    const db = yield (0, mongo_1.connectToDatabase)();
+    (0, course_model_1.initCourseCollection)(db);
+    const courseCollection = (0, course_model_1.getCourseCollection)();
+    const isObjectId = mongodb_1.ObjectId.isValid(courseId);
+    const normalizedCourseId = courseId.trim().toLowerCase();
+    const course = yield courseCollection.findOne(isObjectId
+        ? { _id: new mongodb_1.ObjectId(courseId) }
+        : {
+            $or: [
+                { courseId: courseId.toUpperCase() },
+                { courseId },
+                { slug: normalizedCourseId },
+                {
+                    title: {
+                        $regex: `^${normalizedCourseId.replace(/[-\s]+/g, "[-\\s]")}$`,
+                        $options: "i",
+                    },
+                },
+            ],
+        });
+    if (!course || !course._id) {
+        return null;
+    }
+    return course;
+});
 const createCourse = (payload) => __awaiter(void 0, void 0, void 0, function* () {
     const db = yield (0, mongo_1.connectToDatabase)();
     (0, course_model_1.initCourseCollection)(db);
     const courseCollection = (0, course_model_1.getCourseCollection)();
-    const normalizedCourse = normalizeCoursePayload(payload);
+    const generatedCourseId = yield generateUniqueCourseId(payload.title);
+    const normalizedCourse = normalizeCoursePayload(payload, generatedCourseId);
     const result = yield courseCollection.insertOne(normalizedCourse);
     const insertedCourse = Object.assign(Object.assign({}, normalizedCourse), { _id: result.insertedId });
     return mapMongoCourseToDTO(insertedCourse);
@@ -109,16 +170,8 @@ const getCourses = () => __awaiter(void 0, void 0, void 0, function* () {
 });
 exports.getCourses = getCourses;
 const getCourseById = (courseId) => __awaiter(void 0, void 0, void 0, function* () {
-    if (!mongodb_1.ObjectId.isValid(courseId)) {
-        return null;
-    }
-    const db = yield (0, mongo_1.connectToDatabase)();
-    (0, course_model_1.initCourseCollection)(db);
-    const courseCollection = (0, course_model_1.getCourseCollection)();
-    const course = yield courseCollection.findOne({
-        _id: new mongodb_1.ObjectId(courseId),
-    });
-    if (!course || !course._id) {
+    const course = yield findCourseDocumentByIdentifier(courseId);
+    if (!course) {
         return null;
     }
     return mapMongoCourseToDTO(course);
@@ -126,13 +179,10 @@ const getCourseById = (courseId) => __awaiter(void 0, void 0, void 0, function* 
 exports.getCourseById = getCourseById;
 const addCourseReview = (courseId, payload) => __awaiter(void 0, void 0, void 0, function* () {
     var _a;
-    if (!mongodb_1.ObjectId.isValid(courseId)) {
-        return null;
-    }
     const db = yield (0, mongo_1.connectToDatabase)();
     (0, course_model_1.initCourseCollection)(db);
     const courseCollection = (0, course_model_1.getCourseCollection)();
-    const course = yield courseCollection.findOne({ _id: new mongodb_1.ObjectId(courseId) });
+    const course = yield findCourseDocumentByIdentifier(courseId);
     if (!course) {
         return null;
     }
@@ -140,7 +190,7 @@ const addCourseReview = (courseId, payload) => __awaiter(void 0, void 0, void 0,
     const existingReviews = ((_a = course.reviews) !== null && _a !== void 0 ? _a : []);
     const reviews = [newReview, ...existingReviews];
     const reviewSummary = calculateReviewSummary(reviews);
-    yield courseCollection.updateOne({ _id: new mongodb_1.ObjectId(courseId) }, {
+    yield courseCollection.updateOne({ _id: new mongodb_1.ObjectId(course._id) }, {
         $set: {
             reviews,
             reviewSummary,
@@ -150,15 +200,29 @@ const addCourseReview = (courseId, payload) => __awaiter(void 0, void 0, void 0,
     return mapMongoReviewToDTO(newReview);
 });
 exports.addCourseReview = addCourseReview;
+const getCourseReviews = (courseId) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    const course = yield findCourseDocumentByIdentifier(courseId);
+    if (!course) {
+        return null;
+    }
+    const reviews = ((_a = course.reviews) !== null && _a !== void 0 ? _a : []).map(mapMongoReviewToDTO);
+    return {
+        reviews,
+        reviewSummary: (_b = course.reviewSummary) !== null && _b !== void 0 ? _b : calculateReviewSummary(course.reviews),
+    };
+});
+exports.getCourseReviews = getCourseReviews;
 const deleteCourse = (courseId) => __awaiter(void 0, void 0, void 0, function* () {
-    if (!mongodb_1.ObjectId.isValid(courseId)) {
+    const course = yield findCourseDocumentByIdentifier(courseId);
+    if (!course) {
         return false;
     }
     const db = yield (0, mongo_1.connectToDatabase)();
     (0, course_model_1.initCourseCollection)(db);
     const courseCollection = (0, course_model_1.getCourseCollection)();
     const result = yield courseCollection.deleteOne({
-        _id: new mongodb_1.ObjectId(courseId),
+        _id: new mongodb_1.ObjectId(course._id),
     });
     return result.deletedCount === 1;
 });

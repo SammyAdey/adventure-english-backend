@@ -1,6 +1,8 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
 import { CourseInputDTO } from "../dto/courses.dto";
-import { addCourseReview, createCourse, deleteCourse, getCourseById, getCourses } from "../services/course.service";
+import { getUserByEmail } from "../services/user.service";
+import { addCourseReview, createCourse, deleteCourse, getCourseById, getCourseReviews, getCourses } from "../services/course.service";
+import { requireRole, verifyAuthToken } from "../utils/auth";
 
 const courseQuestionSchema = {
 	type: "object",
@@ -58,15 +60,21 @@ const courseUnitSchema = {
 const createCourseSchema = {
 	body: {
 		type: "object",
-		required: ["title", "units"],
+		required: ["title"],
 		additionalProperties: false,
 		properties: {
 			title: { type: "string", minLength: 1 },
+			slug: { type: "string", minLength: 1 },
 			summary: { type: "string" },
-			level: {
+			deliveryMode: {
 				type: "string",
-				enum: ["beginner", "intermediate", "advanced"],
+				enum: ["online", "in_person"],
 			},
+			isSoldOut: { type: "boolean" },
+			maxEnrollments: { type: "integer", minimum: 1 },
+			recommendedSessionsPerWeek: { type: "integer", minimum: 1 },
+			sessionCount: { type: "integer", minimum: 1 },
+			target: { type: "string", minLength: 1 },
 			category: { type: "string" },
 			tags: {
 				type: "array",
@@ -75,7 +83,6 @@ const createCourseSchema = {
 			thumbnailUrl: { type: "string" },
 			units: {
 				type: "array",
-				minItems: 1,
 				items: courseUnitSchema,
 			},
 			meta: {
@@ -140,11 +147,17 @@ const courseResponseSchema = {
 	properties: {
 		id: { type: "string" },
 		title: { type: "string" },
+		slug: { type: "string" },
 		summary: { type: "string" },
-		level: {
+		deliveryMode: {
 			type: "string",
-			enum: ["beginner", "intermediate", "advanced"],
+			enum: ["online", "in_person"],
 		},
+		isSoldOut: { type: "boolean" },
+		maxEnrollments: { type: "integer" },
+		recommendedSessionsPerWeek: { type: "integer" },
+		sessionCount: { type: "integer" },
+		target: { type: "string" },
 		category: { type: "string" },
 		tags: {
 			type: "array",
@@ -226,7 +239,7 @@ const courseIdParamSchema = {
 	type: "object",
 	required: ["courseId"],
 	properties: {
-		courseId: { type: "string", minLength: 24, maxLength: 24 },
+		courseId: { type: "string", minLength: 1 },
 	},
 } as const;
 
@@ -242,7 +255,7 @@ const errorResponseSchema = {
 
 const courseReviewInputSchema = {
 	type: "object",
-	required: ["reviewerName", "rating", "comment"],
+	required: ["rating", "comment"],
 	additionalProperties: false,
 	properties: {
 		reviewerName: { type: "string", minLength: 1 },
@@ -268,6 +281,33 @@ const courseReviewResponseSchema = {
 	},
 } as const;
 
+const courseReviewListResponseSchema = {
+	type: "object",
+	required: ["reviews", "reviewSummary"],
+	additionalProperties: false,
+	properties: {
+		reviews: {
+			type: "array",
+			items: courseReviewResponseSchema,
+		},
+		reviewSummary: {
+			type: "object",
+			required: ["averageRating", "ratingCount", "positivePercentage"],
+			additionalProperties: false,
+			properties: {
+				averageRating: { type: "number" },
+				ratingCount: { type: "integer" },
+				positivePercentage: { type: "integer" },
+			},
+		},
+	},
+} as const;
+
+const getEmailFromAuthHeader = (request: FastifyRequest, app: FastifyInstance): string | null => {
+	const decoded = verifyAuthToken(app, request);
+	return decoded?.email ?? null;
+};
+
 export default async function courseRoutes(app: FastifyInstance) {
 	app.post(
 		"/courses",
@@ -276,6 +316,8 @@ export default async function courseRoutes(app: FastifyInstance) {
 		},
 		async (request: FastifyRequest<{ Body: CourseInputDTO }>, reply) => {
 			try {
+				const roleContext = await requireRole(app, request, reply, ["admin", "instructor"]);
+				if (!roleContext) return;
 				const createdCourse = await createCourse(request.body);
 				return reply.code(201).send(createdCourse);
 			} catch (error) {
@@ -362,6 +404,8 @@ export default async function courseRoutes(app: FastifyInstance) {
 		},
 		async (request: FastifyRequest<{ Params: { courseId: string } }>, reply) => {
 			try {
+				const roleContext = await requireRole(app, request, reply, ["admin", "instructor"]);
+				if (!roleContext) return;
 				const success = await deleteCourse(request.params.courseId);
 				if (!success) {
 					return reply.status(404).send({ message: "Course not found" });
@@ -371,6 +415,32 @@ export default async function courseRoutes(app: FastifyInstance) {
 			} catch (error) {
 				app.log.error({ err: error }, "Failed to delete course");
 				return reply.status(500).send({ message: "Failed to delete course", error: "COURSE_DELETE_FAILED" });
+			}
+		},
+	);
+
+	app.get(
+		"/courses/:courseId/reviews",
+		{
+			schema: {
+				params: courseIdParamSchema,
+				response: {
+					200: courseReviewListResponseSchema,
+					404: errorResponseSchema,
+					500: errorResponseSchema,
+				},
+			},
+		},
+		async (request: FastifyRequest<{ Params: { courseId: string } }>, reply) => {
+			try {
+				const reviews = await getCourseReviews(request.params.courseId);
+				if (!reviews) {
+					return reply.status(404).send({ message: "Course not found" });
+				}
+				return reply.send(reviews);
+			} catch (error) {
+				app.log.error({ err: error }, "Failed to fetch course reviews");
+				return reply.status(500).send({ message: "Failed to fetch reviews", error: "COURSE_REVIEW_LIST_FAILED" });
 			}
 		},
 	);
@@ -391,12 +461,22 @@ export default async function courseRoutes(app: FastifyInstance) {
 		async (
 			request: FastifyRequest<{
 				Params: { courseId: string };
-				Body: { reviewerName: string; rating: number; comment: string; headline?: string; avatarUrl?: string };
+				Body: { reviewerName?: string; rating: number; comment: string; headline?: string; avatarUrl?: string };
 			}>,
 			reply,
 		) => {
 			try {
-				const created = await addCourseReview(request.params.courseId, request.body);
+				const tokenEmail = getEmailFromAuthHeader(request, app);
+				const authUser = tokenEmail ? await getUserByEmail(tokenEmail) : null;
+				const fallbackName = authUser
+					? `${authUser.firstName} ${authUser.lastName}`.trim() || authUser.email
+					: tokenEmail
+						? tokenEmail.split("@")[0]
+						: "Anonymous learner";
+				const created = await addCourseReview(request.params.courseId, {
+					...request.body,
+					reviewerName: request.body.reviewerName?.trim() || fallbackName,
+				});
 				if (!created) {
 					return reply.status(404).send({ message: "Course not found" });
 				}

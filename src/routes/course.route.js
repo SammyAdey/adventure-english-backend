@@ -10,7 +10,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = courseRoutes;
+const user_service_1 = require("../services/user.service");
 const course_service_1 = require("../services/course.service");
+const auth_1 = require("../utils/auth");
 const courseQuestionSchema = {
     type: "object",
     required: ["prompt"],
@@ -64,15 +66,21 @@ const courseUnitSchema = {
 const createCourseSchema = {
     body: {
         type: "object",
-        required: ["title", "units"],
+        required: ["title"],
         additionalProperties: false,
         properties: {
             title: { type: "string", minLength: 1 },
+            slug: { type: "string", minLength: 1 },
             summary: { type: "string" },
-            level: {
+            deliveryMode: {
                 type: "string",
-                enum: ["beginner", "intermediate", "advanced"],
+                enum: ["online", "in_person"],
             },
+            isSoldOut: { type: "boolean" },
+            maxEnrollments: { type: "integer", minimum: 1 },
+            recommendedSessionsPerWeek: { type: "integer", minimum: 1 },
+            sessionCount: { type: "integer", minimum: 1 },
+            target: { type: "string", minLength: 1 },
             category: { type: "string" },
             tags: {
                 type: "array",
@@ -81,7 +89,6 @@ const createCourseSchema = {
             thumbnailUrl: { type: "string" },
             units: {
                 type: "array",
-                minItems: 1,
                 items: courseUnitSchema,
             },
             meta: {
@@ -145,11 +152,17 @@ const courseResponseSchema = {
     properties: {
         id: { type: "string" },
         title: { type: "string" },
+        slug: { type: "string" },
         summary: { type: "string" },
-        level: {
+        deliveryMode: {
             type: "string",
-            enum: ["beginner", "intermediate", "advanced"],
+            enum: ["online", "in_person"],
         },
+        isSoldOut: { type: "boolean" },
+        maxEnrollments: { type: "integer" },
+        recommendedSessionsPerWeek: { type: "integer" },
+        sessionCount: { type: "integer" },
+        target: { type: "string" },
         category: { type: "string" },
         tags: {
             type: "array",
@@ -230,7 +243,7 @@ const courseIdParamSchema = {
     type: "object",
     required: ["courseId"],
     properties: {
-        courseId: { type: "string", minLength: 24, maxLength: 24 },
+        courseId: { type: "string", minLength: 1 },
     },
 };
 const errorResponseSchema = {
@@ -244,7 +257,7 @@ const errorResponseSchema = {
 };
 const courseReviewInputSchema = {
     type: "object",
-    required: ["reviewerName", "rating", "comment"],
+    required: ["rating", "comment"],
     additionalProperties: false,
     properties: {
         reviewerName: { type: "string", minLength: 1 },
@@ -268,12 +281,41 @@ const courseReviewResponseSchema = {
         createdAt: { type: "string" },
     },
 };
+const courseReviewListResponseSchema = {
+    type: "object",
+    required: ["reviews", "reviewSummary"],
+    additionalProperties: false,
+    properties: {
+        reviews: {
+            type: "array",
+            items: courseReviewResponseSchema,
+        },
+        reviewSummary: {
+            type: "object",
+            required: ["averageRating", "ratingCount", "positivePercentage"],
+            additionalProperties: false,
+            properties: {
+                averageRating: { type: "number" },
+                ratingCount: { type: "integer" },
+                positivePercentage: { type: "integer" },
+            },
+        },
+    },
+};
+const getEmailFromAuthHeader = (request, app) => {
+    var _a;
+    const decoded = (0, auth_1.verifyAuthToken)(app, request);
+    return (_a = decoded === null || decoded === void 0 ? void 0 : decoded.email) !== null && _a !== void 0 ? _a : null;
+};
 function courseRoutes(app) {
     return __awaiter(this, void 0, void 0, function* () {
         app.post("/courses", {
             schema: createCourseSchema,
         }, (request, reply) => __awaiter(this, void 0, void 0, function* () {
             try {
+                const roleContext = yield (0, auth_1.requireRole)(app, request, reply, ["admin", "instructor"]);
+                if (!roleContext)
+                    return;
                 const createdCourse = yield (0, course_service_1.createCourse)(request.body);
                 return reply.code(201).send(createdCourse);
             }
@@ -347,6 +389,9 @@ function courseRoutes(app) {
             },
         }, (request, reply) => __awaiter(this, void 0, void 0, function* () {
             try {
+                const roleContext = yield (0, auth_1.requireRole)(app, request, reply, ["admin", "instructor"]);
+                if (!roleContext)
+                    return;
                 const success = yield (0, course_service_1.deleteCourse)(request.params.courseId);
                 if (!success) {
                     return reply.status(404).send({ message: "Course not found" });
@@ -356,6 +401,28 @@ function courseRoutes(app) {
             catch (error) {
                 app.log.error({ err: error }, "Failed to delete course");
                 return reply.status(500).send({ message: "Failed to delete course", error: "COURSE_DELETE_FAILED" });
+            }
+        }));
+        app.get("/courses/:courseId/reviews", {
+            schema: {
+                params: courseIdParamSchema,
+                response: {
+                    200: courseReviewListResponseSchema,
+                    404: errorResponseSchema,
+                    500: errorResponseSchema,
+                },
+            },
+        }, (request, reply) => __awaiter(this, void 0, void 0, function* () {
+            try {
+                const reviews = yield (0, course_service_1.getCourseReviews)(request.params.courseId);
+                if (!reviews) {
+                    return reply.status(404).send({ message: "Course not found" });
+                }
+                return reply.send(reviews);
+            }
+            catch (error) {
+                app.log.error({ err: error }, "Failed to fetch course reviews");
+                return reply.status(500).send({ message: "Failed to fetch reviews", error: "COURSE_REVIEW_LIST_FAILED" });
             }
         }));
         app.post("/courses/:courseId/reviews", {
@@ -369,8 +436,16 @@ function courseRoutes(app) {
                 },
             },
         }, (request, reply) => __awaiter(this, void 0, void 0, function* () {
+            var _a;
             try {
-                const created = yield (0, course_service_1.addCourseReview)(request.params.courseId, request.body);
+                const tokenEmail = getEmailFromAuthHeader(request, app);
+                const authUser = tokenEmail ? yield (0, user_service_1.getUserByEmail)(tokenEmail) : null;
+                const fallbackName = authUser
+                    ? `${authUser.firstName} ${authUser.lastName}`.trim() || authUser.email
+                    : tokenEmail
+                        ? tokenEmail.split("@")[0]
+                        : "Anonymous learner";
+                const created = yield (0, course_service_1.addCourseReview)(request.params.courseId, Object.assign(Object.assign({}, request.body), { reviewerName: ((_a = request.body.reviewerName) === null || _a === void 0 ? void 0 : _a.trim()) || fallbackName }));
                 if (!created) {
                     return reply.status(404).send({ message: "Course not found" });
                 }
