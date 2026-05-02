@@ -8,7 +8,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
     "migrate": "pnpm build && node src/scripts/migrate.js",
     "build": "tsc",
-    "start": "node dist/app.js"
+    "start": "node src/app.js"
   },
   "keywords": [],
   "author": "",
