@@ -2,13 +2,13 @@
   "name": "adventure-english-backend",
   "version": "1.0.0",
   "packageManager": "pnpm@10.6.3",
-  "main": "index.js",
+  "main": "dist/app.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
-    "migrate": "pnpm build && node src/scripts/migrate.js",
+    "migrate": "pnpm build && node dist/scripts/migrate.js",
     "build": "tsc",
-    "start": "node src/app.js"
+    "start": "node dist/app.js"
   },
   "keywords": [],
   "author": "",

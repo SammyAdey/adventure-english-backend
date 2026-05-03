@@ -34,18 +34,26 @@ Represents the course catalog domain, including:
   - `"online" | "in_person"`
   - Used to distinguish video-based vs fixed-session in-person courses.
 
+- `InstructionalLanguage`
+  - `"en" | "zh"` (`zh` = Mandarin instructional track for titles and video assets).
+
+- `LocalizedTitlesDTO` / `LocalizedVideoUrlsDTO`
+  - Fixed-key objects `{ en: string; zh?: string }` for localized strings under Fastify JSON Schema.
+
 - `CourseVideoDTO`
   - One lesson video inside a unit.
-  - Used by `CourseUnitDTO.videos`.
+  - Optional `titles` and `videoUrls` for per-language lesson title and video URL; legacy `title` / `videoUrl` remain the canonical English fields and are kept in sync on write.
 
 - `CourseQuestionDTO`
   - Optional assessment item attached to a unit.
 
 - `CourseUnitDTO`
   - A logical learning block containing videos and optional questions.
+  - Optional `titles` for localized unit titles.
 
 - `CourseMetaDTO`
-  - Display metadata for learner UI (badge, counts, duration, included items).
+  - Display metadata for learner UI (badge, counts, duration, `includes`, audio/subtitle language lists).
+  - `features?: string[]` — short marketing bullets for public catalog cards (not the same as `includes`, which is used for purchase/perk copy on course detail).
 
 - `CoursePricingDTO`
   - Price and currency details used by course purchase/checkout flows.
@@ -61,11 +69,12 @@ Represents the course catalog domain, including:
 
 - `CourseInputDTO`
   - Input shape for create/update-style operations.
-  - Includes business fields like `target`, `deliveryMode`, `maxEnrollments`, `sessionCount`.
+  - Includes `instructionalLanguages`, `isRecommended`, business fields like `target`, `deliveryMode`, `maxEnrollments`, `sessionCount`, nested `meta` / `pricing` / `units`.
 
 - `CourseDTO`
   - Response shape returned to clients.
   - Extends `CourseInputDTO` with required identity/time/review summary fields.
+  - `instructionalLanguages` is always normalized for API consumers (default `["en"]` when absent in storage).
 
 - `MongoCourseReview`, `MongoCourse`
   - Internal Mongo persistence shapes (`_id` support, ObjectId-ready).
@@ -79,9 +88,10 @@ Represents the course catalog domain, including:
 ### Typical flow
 
 1. Route validates request body -> `CourseInputDTO`
-2. Service normalizes payload (slug, defaults, generated courseId)
-3. Stored as `MongoCourse`
-4. Returned to client as `CourseDTO`
+2. Service normalizes payload (slug, defaults, generated `courseId`, instructional language list, localized unit/video titles and URLs, `isRecommended` default)
+3. Business rules: if `zh` is in `instructionalLanguages`, every unit and video must have Mandarin titles and every video must have a Mandarin URL — otherwise a validation error is thrown (**400**)
+4. Stored as `MongoCourse`
+5. Returned to client as `CourseDTO` with derived `titles` / `videoUrls` objects on read when legacy docs omit them
 
 ---
 

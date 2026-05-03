@@ -311,7 +311,17 @@ Implemented for frontend learner dashboard:
 
 ### `POST /courses`
 
-Request (minimal):
+Requires JWT with role `admin` or `instructor`.
+
+Common optional fields:
+
+- `instructionalLanguages`: `["en"]` and/or `["zh"]` (Mandarin track). If `zh` is included, every unit and video must include Mandarin `titles.zh` and (for videos) `videoUrls.zh`; otherwise the API returns **400** with a clear message.
+- `isRecommended`: boolean — highlight on the public marketing catalog.
+- `meta.features`: string array — short bullets for marketing course cards (distinct from `meta.includes`).
+- `meta`: other display metadata (`badge`, counts, `subtitleLanguages`, `includes`, etc.).
+- Per unit/video: optional `titles: { en, zh? }` and `videoUrls: { en, zh? }` on videos; `titles` on units. Legacy `title` / `videoUrl` stay in sync with the English (`en`) values.
+
+Request (minimal in-person example):
 
 ```json
 {
@@ -421,6 +431,8 @@ Books a learner into a specific session (capacity-checked).
 
 ### `GET /courses`
 
+Public list (no auth). Each course includes normalized fields such as `instructionalLanguages` (defaults to `["en"]` when omitted in storage), `isRecommended`, `meta` (including `features` when set), `pricing`, `units`, and reviews summary.
+
 Response `200`:
 
 ```json
@@ -429,6 +441,11 @@ Response `200`:
     {
       "id": "ES-4G9KQ2",
       "title": "Exam Speaking",
+      "instructionalLanguages": ["en"],
+      "isRecommended": false,
+      "meta": {
+        "features": ["Example marketing bullet"]
+      },
       "units": [],
       "reviews": [],
       "reviewSummary": {
@@ -440,6 +457,10 @@ Response `200`:
   ]
 }
 ```
+
+### `PATCH /courses/:courseId`
+
+Updates a course (same body shape as create for supplied fields). Requires JWT with role `admin` or `instructor`. Validation errors (e.g. Mandarin enabled but incomplete localized fields) return **400**.
 
 ### `GET /courses/:courseId`
 

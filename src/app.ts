@@ -1,6 +1,6 @@
-import Fastify from 'fastify';
-import dotenv from 'dotenv';
-import cors from '@fastify/cors';
+import "./load-env";
+import Fastify from "fastify";
+import cors from "@fastify/cors";
 import fastifyRawBody from "fastify-raw-body";
 import rootRoute from './routes/root.route';
 import jwt from '@fastify/jwt';
@@ -9,11 +9,10 @@ import courseRoutes from './routes/course.route';
 import userRoutes from './routes/user.route';
 import cohortRoutes from './routes/cohort.route';
 import calIntegrationRoutes from './routes/integrations.cal.route';
+import cloudinaryIntegrationRoutes from "./routes/integrations.cloudinary.route";
 import stripeIntegrationRoutes from "./routes/integrations.stripe.route";
 import dashboardRoutes from "./routes/dashboard.route";
 import { runMigrations } from "./migrations/run-migrations";
-
-dotenv.config();
 
 const app = Fastify({ logger: true });
 const defaultCorsOrigins = [
@@ -21,6 +20,9 @@ const defaultCorsOrigins = [
 	"https://adventureenglish.com",
 	"http://localhost:3000",
 	"http://localhost:3001",
+	// Same hosts as above; browsers treat localhost and 127.0.0.1 as different origins.
+	"http://127.0.0.1:3000",
+	"http://127.0.0.1:3001",
 ];
 const configuredCorsOrigins = (process.env.CORS_ORIGINS ?? "")
 	.split(",")
@@ -65,6 +67,7 @@ app.register(courseRoutes);
 app.register(userRoutes);
 app.register(cohortRoutes);
 app.register(calIntegrationRoutes);
+app.register(cloudinaryIntegrationRoutes);
 app.register(stripeIntegrationRoutes);
 app.register(dashboardRoutes);
 

@@ -94,7 +94,11 @@ Model type: `MongoCourse` (`src/dto/courses.dto.ts`)
   title: string;
   slug?: string;
   summary?: string;
+  /** Instructional content languages (`zh` = Mandarin track). Omit or empty → API treats as `["en"]`. */
+  instructionalLanguages?: Array<"en" | "zh">;
   deliveryMode?: "online" | "in_person";
+  /** Marketing flag for “recommended” placement on catalog cards. */
+  isRecommended?: boolean;
   isSoldOut?: boolean;
   maxEnrollments?: number;
   recommendedSessionsPerWeek?: number;
@@ -104,13 +108,22 @@ Model type: `MongoCourse` (`src/dto/courses.dto.ts`)
   tags?: string[];
   thumbnailUrl?: string;
   units?: Array<{
+    /** Canonical English title; kept in sync with `titles.en` when localized objects are present. */
     title: string;
+    /** Per-language unit titles; omit on legacy docs — readers derive `{ en: title }`. */
+    titles?: { en: string; zh?: string };
     description?: string;
     order?: number;
     videos: Array<{
+      /** Canonical English lesson title; synced with `titles.en`. */
       title: string;
+      /** Localized lesson titles. */
+      titles?: { en: string; zh?: string };
       description?: string;
+      /** Canonical English asset URL; synced with `videoUrls.en`. */
       videoUrl: string;
+      /** Per-language video URLs (separate assets per language). */
+      videoUrls?: { en: string; zh?: string };
       order?: number;
       durationInSeconds?: number;
       isPreviewAvailable?: boolean;
@@ -133,6 +146,8 @@ Model type: `MongoCourse` (`src/dto/courses.dto.ts`)
     exercisesCount?: number;
     durationInMinutes?: number;
     includes?: string[];
+    /** Marketing bullet strings for landing/catalog cards (not the same as `includes`). */
+    features?: string[];
   };
   pricing?: {
     currency: string;
@@ -157,11 +172,15 @@ Model type: `MongoCourse` (`src/dto/courses.dto.ts`)
   };
   createdAt: Date;
   updatedAt: Date;
+  deletedAt?: Date | null; // soft delete — omit or null = active; set = hidden from catalog
 }
 ```
 
 ### Notes
 
+- **Soft delete:** Setting `deletedAt` hides the course from list/get/edit/reviews and from cohort creation; the document stays in MongoDB. `courseId` uniqueness checks for *new* IDs still consider soft-deleted rows. Enrolled learners can still resolve titles via `users` flows that query by `courseId` without the active filter.
+- **Instructional languages:** `instructionalLanguages` lists which tracks exist for **localized unit titles and lesson titles/URLs** (not the same as `meta.subtitleLanguages`, which is subtitle metadata). If `"zh"` is included, create/update validation requires Mandarin `zh` strings on every unit and every video (`titles.zh`, `videoUrls.zh`). Legacy documents without `titles` / `videoUrls` are treated as English-only; the service maps them to `{ en: title }` / `{ en: videoUrl }` on read and syncs legacy fields from `titles.en` / `videoUrls.en` on write.
+- **Marketing:** `isRecommended` drives “recommended” styling on the public marketing catalog. `meta.features` holds short bullet strings for course cards; `meta.includes` is separate (typically perks listed on the purchased course detail view).
 - Reviews are embedded in the course document.
 - `courseId` is the stable logical identifier used by clients.
 - Current service layer still includes legacy compatibility for historical `level` values when mapping out.

@@ -25,7 +25,7 @@ type UpdateUserInput = {
 	interests?: string[];
 };
 
-const normalizeRole = (role?: LegacyInputRole): UserRole => {
+export const normalizeRole = (role?: LegacyInputRole): UserRole => {
 	if (!role) {
 		return "student";
 	}

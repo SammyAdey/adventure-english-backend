@@ -2,6 +2,9 @@
 /dist
 /coverage
 
+# Compiled output must not live beside .ts (Node resolves .js first and breaks `pnpm dev`).
+src/**/*.js
+
 # logs
 npm-debug.log*
 yarn-debug.log*

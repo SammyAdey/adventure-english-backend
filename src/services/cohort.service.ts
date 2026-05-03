@@ -14,6 +14,7 @@ import { getAttendanceCollection, initAttendanceCollection } from "../models/att
 import { getCohortCollection, initCohortCollection } from "../models/cohort.model";
 import { getSessionCollection, initSessionCollection } from "../models/session.model";
 import { getUserCollection, initUserCollection } from "../models/user.model";
+import { mongoCourseActiveFilter } from "../utils/course-active-filter";
 import { connectToDatabase } from "../utils/mongo";
 
 const ALPHANUMERIC_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -61,13 +62,15 @@ const findCourseByIdentifier = async (courseId: string): Promise<(MongoCourse & 
 	const courses = db.collection<MongoCourse>("courses");
 	const normalized = courseId.trim().toLowerCase();
 	const isObjectId = ObjectId.isValid(courseId);
-	const course = await courses.findOne(
-		isObjectId
-			? { _id: new ObjectId(courseId) }
-			: {
-					$or: [{ courseId }, { courseId: courseId.toUpperCase() }, { slug: normalized }],
-				},
-	);
+	const identityFilter = isObjectId
+		? { _id: new ObjectId(courseId) }
+		: {
+				$or: [{ courseId }, { courseId: courseId.toUpperCase() }, { slug: normalized }],
+			};
+
+	const course = await courses.findOne({
+		$and: [identityFilter, mongoCourseActiveFilter],
+	});
 	if (!course || !course._id) return null;
 	return course as MongoCourse & { _id: ObjectId };
 };

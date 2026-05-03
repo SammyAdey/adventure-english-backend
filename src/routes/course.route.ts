@@ -1,8 +1,19 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
 import { CourseInputDTO } from "../dto/courses.dto";
+import { CourseValidationError } from "../services/course.service";
 import { getUserByEmail } from "../services/user.service";
-import { addCourseReview, createCourse, deleteCourse, getCourseById, getCourseReviews, getCourses } from "../services/course.service";
+import {
+	addCourseReview,
+	createCourse,
+	deleteCourse,
+	getCourseById,
+	getCourseLearnerMetrics,
+	getCourseReviews,
+	getCourses,
+	updateCourse,
+} from "../services/course.service";
 import { requireRole, verifyAuthToken } from "../utils/auth";
+import { logCourseMutationBody } from "../utils/log-course-body";
 
 const courseQuestionSchema = {
 	type: "object",
@@ -23,6 +34,24 @@ const courseQuestionSchema = {
 	},
 } as const;
 
+const localizedTitlesSchema = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		en: { type: "string", minLength: 1 },
+		zh: { type: "string", minLength: 1 },
+	},
+} as const;
+
+const localizedVideoUrlsSchema = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		en: { type: "string", minLength: 1 },
+		zh: { type: "string", minLength: 1 },
+	},
+} as const;
+
 const courseVideoSchema = {
 	type: "object",
 	required: ["title", "videoUrl"],
@@ -31,6 +60,8 @@ const courseVideoSchema = {
 		title: { type: "string", minLength: 1 },
 		description: { type: "string" },
 		videoUrl: { type: "string", minLength: 1 },
+		titles: localizedTitlesSchema,
+		videoUrls: localizedVideoUrlsSchema,
 		order: { type: "integer", minimum: 0 },
 		durationInSeconds: { type: "integer", minimum: 0 },
 		isPreviewAvailable: { type: "boolean" },
@@ -44,6 +75,7 @@ const courseUnitSchema = {
 	properties: {
 		title: { type: "string", minLength: 1 },
 		description: { type: "string" },
+		titles: localizedTitlesSchema,
 		order: { type: "integer", minimum: 0 },
 		videos: {
 			type: "array",
@@ -60,21 +92,34 @@ const courseUnitSchema = {
 const createCourseSchema = {
 	body: {
 		type: "object",
-		required: ["title"],
+		required: ["title", "instructionalLanguages", "isRecommended"],
 		additionalProperties: false,
 		properties: {
 			title: { type: "string", minLength: 1 },
 			slug: { type: "string", minLength: 1 },
 			summary: { type: "string" },
+			instructionalLanguages: {
+				type: "array",
+				minItems: 1,
+				maxItems: 2,
+				items: { type: "string", enum: ["en", "zh"] },
+			},
 			deliveryMode: {
 				type: "string",
 				enum: ["online", "in_person"],
 			},
+			isRecommended: { type: "boolean" },
 			isSoldOut: { type: "boolean" },
 			maxEnrollments: { type: "integer", minimum: 1 },
 			recommendedSessionsPerWeek: { type: "integer", minimum: 1 },
 			sessionCount: { type: "integer", minimum: 1 },
 			target: { type: "string", minLength: 1 },
+			targets: {
+				type: "array",
+				minItems: 1,
+				maxItems: 16,
+				items: { type: "string", minLength: 1 },
+			},
 			category: { type: "string" },
 			tags: {
 				type: "array",
@@ -104,6 +149,10 @@ const createCourseSchema = {
 					exercisesCount: { type: "integer", minimum: 0 },
 					durationInMinutes: { type: "integer", minimum: 0 },
 					includes: {
+						type: "array",
+						items: { type: "string" },
+					},
+					features: {
 						type: "array",
 						items: { type: "string" },
 					},
@@ -142,22 +191,44 @@ const createCourseSchema = {
 
 const courseResponseSchema = {
 	type: "object",
-	required: ["id", "title", "units", "createdAt", "updatedAt", "reviews", "reviewSummary"],
+	required: [
+		"id",
+		"title",
+		"instructionalLanguages",
+		"isRecommended",
+		"units",
+		"createdAt",
+		"updatedAt",
+		"reviews",
+		"reviewSummary",
+	],
 	additionalProperties: false,
 	properties: {
 		id: { type: "string" },
+		courseId: { type: "string" },
 		title: { type: "string" },
 		slug: { type: "string" },
 		summary: { type: "string" },
+		instructionalLanguages: {
+			type: "array",
+			minItems: 1,
+			maxItems: 2,
+			items: { type: "string", enum: ["en", "zh"] },
+		},
 		deliveryMode: {
 			type: "string",
 			enum: ["online", "in_person"],
 		},
+		isRecommended: { type: "boolean" },
 		isSoldOut: { type: "boolean" },
 		maxEnrollments: { type: "integer" },
 		recommendedSessionsPerWeek: { type: "integer" },
 		sessionCount: { type: "integer" },
 		target: { type: "string" },
+		targets: {
+			type: "array",
+			items: { type: "string" },
+		},
 		category: { type: "string" },
 		tags: {
 			type: "array",
@@ -186,6 +257,10 @@ const courseResponseSchema = {
 				exercisesCount: { type: "integer" },
 				durationInMinutes: { type: "integer" },
 				includes: {
+					type: "array",
+					items: { type: "string" },
+				},
+				features: {
 					type: "array",
 					items: { type: "string" },
 				},
@@ -240,6 +315,32 @@ const courseIdParamSchema = {
 	required: ["courseId"],
 	properties: {
 		courseId: { type: "string", minLength: 1 },
+	},
+} as const;
+
+const courseLearnerMetricsResponseSchema = {
+	type: "object",
+	required: [
+		"resolvedCourseId",
+		"title",
+		"usersWithEnrollment",
+		"usersWithActiveEnrollment",
+		"usersWithPurchaseRecord",
+		"usersWithActivePurchaseAccess",
+		"cohortCount",
+		"cohortSeatsReserved",
+	],
+	additionalProperties: false,
+	properties: {
+		resolvedCourseId: { type: "string" },
+		title: { type: "string" },
+		slug: { type: "string" },
+		usersWithEnrollment: { type: "integer", minimum: 0 },
+		usersWithActiveEnrollment: { type: "integer", minimum: 0 },
+		usersWithPurchaseRecord: { type: "integer", minimum: 0 },
+		usersWithActivePurchaseAccess: { type: "integer", minimum: 0 },
+		cohortCount: { type: "integer", minimum: 0 },
+		cohortSeatsReserved: { type: "integer", minimum: 0 },
 	},
 } as const;
 
@@ -312,15 +413,26 @@ export default async function courseRoutes(app: FastifyInstance) {
 	app.post(
 		"/courses",
 		{
-			schema: createCourseSchema,
+			schema: {
+				...createCourseSchema,
+				response: {
+					201: courseResponseSchema,
+					400: errorResponseSchema,
+					500: errorResponseSchema,
+				},
+			},
 		},
 		async (request: FastifyRequest<{ Body: CourseInputDTO }>, reply) => {
 			try {
 				const roleContext = await requireRole(app, request, reply, ["admin", "instructor"]);
 				if (!roleContext) return;
+				logCourseMutationBody(request.log, "POST /courses", request.body);
 				const createdCourse = await createCourse(request.body);
 				return reply.code(201).send(createdCourse);
 			} catch (error) {
+				if (error instanceof CourseValidationError) {
+					return reply.status(400).send({ message: error.message });
+				}
 				app.log.error({ err: error }, "Failed to create course");
 				return reply
 					.status(500)
@@ -390,6 +502,76 @@ export default async function courseRoutes(app: FastifyInstance) {
 		},
 	);
 
+	app.get(
+		"/courses/:courseId/stats",
+		{
+			schema: {
+				params: courseIdParamSchema,
+				response: {
+					200: courseLearnerMetricsResponseSchema,
+					401: errorResponseSchema,
+					403: errorResponseSchema,
+					404: errorResponseSchema,
+					500: errorResponseSchema,
+				},
+			},
+		},
+		async (request: FastifyRequest<{ Params: { courseId: string } }>, reply) => {
+			try {
+				const roleContext = await requireRole(app, request, reply, ["admin", "instructor"]);
+				if (!roleContext) return;
+
+				const metrics = await getCourseLearnerMetrics(request.params.courseId);
+				if (!metrics) {
+					return reply.status(404).send({ message: "Course not found" });
+				}
+
+				return reply.send(metrics);
+			} catch (error) {
+				app.log.error({ err: error }, "Failed to fetch course learner metrics");
+				return reply
+					.status(500)
+					.send({ message: "Failed to fetch course stats", error: "COURSE_STATS_FAILED" });
+			}
+		},
+	);
+
+	app.patch(
+		"/courses/:courseId",
+		{
+			schema: {
+				params: courseIdParamSchema,
+				body: createCourseSchema.body,
+				response: {
+					200: courseResponseSchema,
+					400: errorResponseSchema,
+					404: errorResponseSchema,
+					500: errorResponseSchema,
+				},
+			},
+		},
+		async (request: FastifyRequest<{ Params: { courseId: string }; Body: CourseInputDTO }>, reply) => {
+			try {
+				const roleContext = await requireRole(app, request, reply, ["admin", "instructor"]);
+				if (!roleContext) return;
+				logCourseMutationBody(request.log, "PATCH /courses/:courseId", request.body, request.params.courseId);
+				const updated = await updateCourse(request.params.courseId, request.body);
+				if (!updated) {
+					return reply.status(404).send({ message: "Course not found" });
+				}
+				return reply.send(updated);
+			} catch (error) {
+				if (error instanceof CourseValidationError) {
+					return reply.status(400).send({ message: error.message });
+				}
+				app.log.error({ err: error }, "Failed to update course");
+				return reply
+					.status(500)
+					.send({ message: "Failed to update course", error: "COURSE_UPDATE_FAILED" });
+			}
+		},
+	);
+
 	app.delete(
 		"/courses/:courseId",
 		{
@@ -411,7 +593,7 @@ export default async function courseRoutes(app: FastifyInstance) {
 					return reply.status(404).send({ message: "Course not found" });
 				}
 
-				return reply.status(204).send();
+				return reply.code(204).send();
 			} catch (error) {
 				app.log.error({ err: error }, "Failed to delete course");
 				return reply.status(500).send({ message: "Failed to delete course", error: "COURSE_DELETE_FAILED" });

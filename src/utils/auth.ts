@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { getUserByEmail } from "../services/user.service";
-import { UserRole } from "../dto/users.dto";
+import { getUserByEmail, normalizeRole } from "../services/user.service";
+import type { LegacyInputRole, UserRole } from "../dto/users.dto";
 
 export type AuthTokenPayload = {
 	email: string;
@@ -48,10 +48,17 @@ export const requireRole = async (
 	}
 
 	const user = await getUserByEmail(decoded.email);
-	if (!user?.role || !allowedRoles.includes(user.role)) {
+	if (!user) {
 		reply.status(403).send({ message: "Forbidden" });
 		return null;
 	}
 
-	return { ...decoded, role: user.role, sub: user.id };
+	// DB may still store legacy "teacher"; align with user.service normalization.
+	const role = normalizeRole(user.role as LegacyInputRole | undefined);
+	if (!allowedRoles.includes(role)) {
+		reply.status(403).send({ message: "Forbidden" });
+		return null;
+	}
+
+	return { ...decoded, role, sub: user.id };
 };

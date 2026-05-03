@@ -1,4 +1,6 @@
 import { FastifyInstance } from "fastify";
+import type { MongoCourse } from "../dto/courses.dto";
+import { mongoCourseActiveFilter } from "../utils/course-active-filter";
 import { connectToDatabase } from "../utils/mongo";
 import { requireRole } from "../utils/auth";
 
@@ -27,7 +29,7 @@ export default async function dashboardRoutes(app: FastifyInstance) {
 
 			const db = await connectToDatabase();
 			const usersCollection = db.collection("users");
-			const coursesCollection = db.collection("courses");
+			const coursesCollection = db.collection<MongoCourse>("courses");
 
 			const startOfMonth = new Date();
 			startOfMonth.setUTCDate(1);
@@ -36,7 +38,7 @@ export default async function dashboardRoutes(app: FastifyInstance) {
 			const [totalUsers, activeUsers, totalCourses, newEnrollmentsAgg] = await Promise.all([
 				usersCollection.countDocuments({}),
 				usersCollection.countDocuments({ status: "active" }),
-				coursesCollection.countDocuments({}),
+				coursesCollection.countDocuments(mongoCourseActiveFilter),
 				usersCollection
 					.aggregate<{ total: number }>([
 						{ $unwind: { path: "$enrollments", preserveNullAndEmptyArrays: false } },

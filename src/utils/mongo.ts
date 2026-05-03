@@ -1,9 +1,12 @@
-import { MongoClient, Db } from 'mongodb';
-import dotenv from 'dotenv';
+import "../load-env";
+import { MongoClient, Db } from "mongodb";
 
-dotenv.config();
-
-const uri = process.env.MONGO_URI as string; // Store this in .env
+const uri = process.env.MONGO_URI?.trim();
+if (!uri) {
+  throw new Error(
+    "MONGO_URI is not set. Add it to backend/.env or backend/.env.local (e.g. mongodb+srv://...).",
+  );
+}
 const client = new MongoClient(uri);
 
 let db: Db;
