@@ -2,6 +2,16 @@
 
 export type CourseDeliveryMode = "online" | "in_person";
 
+/** How long online catalog access remains after purchase (in-person uses cohort `termEndsAt`). */
+export type EnrollmentAccessPeriod = "lifetime" | "three_weeks" | "one_quarter" | "one_year";
+
+export interface CourseCohortPurchaseOptionDTO {
+	cohortId: string;
+	name: string;
+	termLabel?: string;
+	termEndsAt?: Date;
+}
+
 /** Instructional track language; `zh` is Mandarin for localized titles and video assets. */
 export type InstructionalLanguage = "en" | "zh";
 
@@ -15,7 +25,28 @@ export interface LocalizedVideoUrlsDTO {
 	zh?: string;
 }
 
+export type CheckpointQuestionKind =
+	| "multiple_choice"
+	| "true_false"
+	| "short_answer"
+	| "select_all"
+	| "ordering";
+
+export type InteractiveCheckpointPlacement = { mode: "after_unit"; unitId: string; order?: number };
+
+export interface InteractiveCheckpointDTO {
+	id: string;
+	questionKind: CheckpointQuestionKind;
+	title?: string;
+	explanation?: string;
+	placement: InteractiveCheckpointPlacement;
+	/** Authoring payload; validated server-side; answers stripped for public course APIs. */
+	payload: Record<string, unknown>;
+}
+
 export interface CourseVideoDTO {
+	/** Stable id for mid-video checkpoints and client keys; assigned when missing on save. */
+	id?: string;
 	title: string;
 	description?: string;
 	videoUrl: string;
@@ -28,6 +59,20 @@ export interface CourseVideoDTO {
 	isPreviewAvailable?: boolean;
 }
 
+export interface CourseWorksheetDTO {
+	id: string;
+	title: string;
+	/** Cloudinary public_id for raw PDF delivery/signing. */
+	publicId: string;
+	/** Optional preview URL (admin UX); learner downloads should use signed endpoint. */
+	fileUrl?: string;
+	fileName?: string;
+	mimeType: "application/pdf";
+	/** Omit or null for course-wide worksheet. */
+	unitId?: string | null;
+	order?: number;
+}
+
 export interface CourseQuestionDTO {
 	prompt: string;
 	type?: "multiple-choice" | "short-answer" | "true-false";
@@ -37,6 +82,8 @@ export interface CourseQuestionDTO {
 }
 
 export interface CourseUnitDTO {
+	/** Stable id for worksheets and after-unit checkpoints; assigned when missing on save. */
+	id?: string;
 	title: string;
 	description?: string;
 	/** Localized unit titles; legacy `title` is canonical English when absent. */
@@ -108,8 +155,12 @@ export interface CourseInputDTO {
 	tags?: string[];
 	thumbnailUrl?: string;
 	units?: CourseUnitDTO[];
+	worksheets?: CourseWorksheetDTO[];
+	interactiveCheckpoints?: InteractiveCheckpointDTO[];
 	meta?: CourseMetaDTO;
 	pricing?: CoursePricingDTO;
+	/** Online: access window after purchase. Ignored for `in_person` at checkout (cohort term applies). */
+	enrollmentAccessPeriod?: EnrollmentAccessPeriod;
 	reviews?: CourseReviewInputDTO[];
 }
 
@@ -120,6 +171,8 @@ export interface CourseDTO extends CourseInputDTO {
 	updatedAt: Date;
 	reviews: CourseReviewDTO[];
 	reviewSummary: CourseReviewSummaryDTO;
+	/** On public `GET /courses/:id` when `deliveryMode` is `in_person`: open cohorts for semester checkout. */
+	cohortPurchaseOptions?: CourseCohortPurchaseOptionDTO[];
 }
 
 // This represents the MongoDB stored shape

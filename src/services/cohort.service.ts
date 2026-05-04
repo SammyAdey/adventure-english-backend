@@ -9,7 +9,7 @@ import {
 	SessionDTO,
 } from "../dto/cohorts.dto";
 import { MongoCourse } from "../dto/courses.dto";
-import { MongoUser } from "../dto/users.dto";
+import type { MongoUser, PurchasedCourseDTO } from "../dto/users.dto";
 import { getAttendanceCollection, initAttendanceCollection } from "../models/attendance.model";
 import { getCohortCollection, initCohortCollection } from "../models/cohort.model";
 import { getSessionCollection, initSessionCollection } from "../models/session.model";
@@ -37,6 +37,9 @@ const mapCohort = (cohort: MongoCohort & { _id: ObjectId }): CohortDTO => ({
 	enrollmentCount: cohort.enrollmentCount,
 	recommendedSessionsPerWeek: cohort.recommendedSessionsPerWeek,
 	sessionCount: cohort.sessionCount,
+	termLabel: cohort.termLabel,
+	termStartsAt: cohort.termStartsAt,
+	termEndsAt: cohort.termEndsAt,
 	status: cohort.status,
 	createdAt: cohort.createdAt,
 	updatedAt: cohort.updatedAt,
@@ -75,6 +78,25 @@ const findCourseByIdentifier = async (courseId: string): Promise<(MongoCourse & 
 	return course as MongoCourse & { _id: ObjectId };
 };
 
+const parseOptionalDate = (value: unknown): Date | undefined => {
+	if (value == null || value === "") return undefined;
+	if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value;
+	const d = new Date(String(value));
+	return Number.isNaN(d.getTime()) ? undefined : d;
+};
+
+export const getCohortByCohortIdForCourse = async (courseIdParam: string, cohortId: string): Promise<CohortDTO | null> => {
+	const course = await findCourseByIdentifier(courseIdParam);
+	if (!course) return null;
+	const resolvedCourseId = course.courseId ?? course._id.toHexString();
+	const db = await connectToDatabase();
+	initCohortCollection(db);
+	const cohortCollection = getCohortCollection();
+	const cohort = await cohortCollection.findOne({ cohortId, courseId: resolvedCourseId });
+	if (!cohort || !cohort._id) return null;
+	return mapCohort(cohort as MongoCohort & { _id: ObjectId });
+};
+
 export const createCohort = async (payload: CohortCreateInputDTO): Promise<CohortDTO | null> => {
 	const db = await connectToDatabase();
 	initCohortCollection(db);
@@ -84,6 +106,8 @@ export const createCohort = async (payload: CohortCreateInputDTO): Promise<Cohor
 	if (!course) return null;
 
 	const now = new Date();
+	const termStartsAt = parseOptionalDate(payload.termStartsAt);
+	const termEndsAt = parseOptionalDate(payload.termEndsAt);
 	const document: MongoCohort = {
 		cohortId: buildCohortId(),
 		courseId: course.courseId ?? course._id.toHexString(),
@@ -95,6 +119,9 @@ export const createCohort = async (payload: CohortCreateInputDTO): Promise<Cohor
 		enrollmentCount: 0,
 		recommendedSessionsPerWeek: payload.recommendedSessionsPerWeek,
 		sessionCount: payload.sessionCount,
+		...(payload.termLabel?.trim() ? { termLabel: payload.termLabel.trim() } : {}),
+		...(termStartsAt ? { termStartsAt } : {}),
+		...(termEndsAt ? { termEndsAt } : {}),
 		status: payload.status ?? "open",
 		createdAt: now,
 		updatedAt: now,
@@ -170,16 +197,32 @@ export const enrollUserInCohort = async (courseId: string, cohortId: string, use
 
 	const user = await usersCollection.findOne({ email: userEmail });
 	if (!user || !user._id) return false;
-	const hasEntitlement = (user.purchasedCourses ?? []).some(
-		(purchase) =>
-			purchase.courseId === resolvedCourseId &&
-			(purchase.accessStatus ?? "active") === "active" &&
-			(purchase.paymentStatus === "succeeded" || purchase.paymentStatus === undefined),
-	);
+
+	const deliveryMode = course.deliveryMode ?? "online";
+	const nowMs = Date.now();
+
+	const purchaseMatchesCohort = (purchase: PurchasedCourseDTO): boolean => {
+		if (!purchase || purchase.courseId !== resolvedCourseId) return false;
+		if ((purchase.accessStatus ?? "active") !== "active") return false;
+		if (!(purchase.paymentStatus === "succeeded" || purchase.paymentStatus === undefined)) return false;
+		const pExp = purchase.accessExpiresAt ? new Date(purchase.accessExpiresAt).getTime() : undefined;
+		if (pExp != null && pExp <= nowMs) return false;
+		if (deliveryMode === "in_person") {
+			if (purchase.cohortId) return purchase.cohortId === cohortId;
+			return true;
+		}
+		return true;
+	};
+
+	const hasEntitlement = (user.purchasedCourses ?? []).some(purchaseMatchesCohort);
 	if (!hasEntitlement) return false;
 
 	const alreadyEnrolled = (user.enrollments ?? []).some((enrollment) => enrollment.cohortId === cohortId);
 	if (alreadyEnrolled) return true;
+
+	const termEnd = cohort.termEndsAt ? new Date(cohort.termEndsAt as Date | string) : undefined;
+	const accessExpiresAt =
+		termEnd && !Number.isNaN(termEnd.getTime()) ? termEnd : undefined;
 
 	const enrollment = {
 		courseId: resolvedCourseId,
@@ -194,6 +237,7 @@ export const enrollUserInCohort = async (courseId: string, cohortId: string, use
 			total: cohort.sessionCount,
 		},
 		recommendedSessionsPerWeek: cohort.recommendedSessionsPerWeek,
+		...(accessExpiresAt ? { accessExpiresAt } : {}),
 	};
 
 	const reserveSeatResult = await cohortCollection.updateOne(
@@ -302,6 +346,9 @@ export const bookSessionForUser = async (
 
 	const enrollment = (user.enrollments ?? []).find((entry) => entry.cohortId === cohortId);
 	if (!enrollment) return false;
+
+	const exp = enrollment.accessExpiresAt ? new Date(enrollment.accessExpiresAt).getTime() : undefined;
+	if (exp != null && exp <= Date.now()) return false;
 
 	const session = await sessionCollection.findOne({ cohortId, sessionId });
 	if (!session || !session._id) return false;

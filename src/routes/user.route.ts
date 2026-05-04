@@ -13,6 +13,10 @@ import {
 	updateUserCourseProgressByEmail,
 	updateUserPurchase,
 } from "../services/user.service";
+import {
+	getInteractiveCheckpointProgressForUser,
+	submitInteractiveCheckpointAttempt,
+} from "../services/checkpoint-progress.service";
 import { requireRole, verifyAuthToken } from "../utils/auth";
 
 const purchasedCourseSchema = {
@@ -244,6 +248,54 @@ const meCourseProgressSchema = {
 	},
 } as const;
 
+const meCheckpointProgressResponseSchema = {
+	type: "object",
+	required: ["solvedCheckpointIds", "unitProgress"],
+	additionalProperties: false,
+	properties: {
+		solvedCheckpointIds: {
+			type: "array",
+			items: { type: "string" },
+		},
+		unitProgress: {
+			type: "array",
+			items: {
+				type: "object",
+				required: ["unitId", "complete", "checkpointIds"],
+				additionalProperties: false,
+				properties: {
+					unitId: { type: "string" },
+					complete: { type: "boolean" },
+					checkpointIds: {
+						type: "array",
+						items: { type: "string" },
+					},
+				},
+			},
+		},
+	},
+} as const;
+
+const checkpointAttemptParamsSchema = {
+	type: "object",
+	required: ["courseId", "checkpointId"],
+	properties: {
+		courseId: { type: "string", minLength: 1 },
+		checkpointId: { type: "string", minLength: 1 },
+	},
+} as const;
+
+const checkpointAttemptResponseSchema = {
+	type: "object",
+	required: ["correct"],
+	additionalProperties: false,
+	properties: {
+		correct: { type: "boolean" },
+		explanation: { type: "string" },
+		alreadySolved: { type: "boolean" },
+	},
+} as const;
+
 const meCourseItemSchema = {
 	type: "object",
 	required: [
@@ -267,6 +319,8 @@ const meCourseItemSchema = {
 		attendedSessions: { type: "number" },
 		sessionsLeft: { type: "number" },
 		recommendedSessionsPerWeek: { type: "number" },
+		accessExpiresAt: { type: "string" },
+		accessExpired: { type: "boolean" },
 	},
 } as const;
 
@@ -438,6 +492,67 @@ export default async function userRoutes(app: FastifyInstance) {
 			const updated = await updateUserCourseProgressByEmail(email, request.params.courseId, request.body.progressPercent);
 			if (!updated) return reply.status(404).send({ message: "User or enrollment not found" });
 			return reply.send(updated);
+		},
+	);
+
+	app.get(
+		"/users/me/courses/:courseId/checkpoint-progress",
+		{
+			schema: {
+				params: meCourseProgressParamsSchema,
+				response: {
+					200: meCheckpointProgressResponseSchema,
+					401: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+					403: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+					404: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+				},
+			},
+		},
+		async (request: FastifyRequest<{ Params: { courseId: string } }>, reply) => {
+			const email = getEmailFromAuthHeader(request, app);
+			if (!email) return reply.status(401).send({ message: "Unauthorized" });
+			const result = await getInteractiveCheckpointProgressForUser(email, request.params.courseId);
+			if (!result.ok) {
+				return reply.status(result.status).send({ message: result.message });
+			}
+			return reply.send(result.progress);
+		},
+	);
+
+	app.post(
+		"/users/me/courses/:courseId/checkpoints/:checkpointId/attempt",
+		{
+			schema: {
+				params: checkpointAttemptParamsSchema,
+				body: { type: "object", additionalProperties: true },
+				response: {
+					200: checkpointAttemptResponseSchema,
+					401: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+					403: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+					404: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+				},
+			},
+		},
+		async (
+			request: FastifyRequest<{ Params: { courseId: string; checkpointId: string }; Body: unknown }>,
+			reply,
+		) => {
+			const email = getEmailFromAuthHeader(request, app);
+			if (!email) return reply.status(401).send({ message: "Unauthorized" });
+			const result = await submitInteractiveCheckpointAttempt(
+				email,
+				request.params.courseId,
+				request.params.checkpointId,
+				request.body,
+			);
+			if (!result.ok) {
+				return reply.status(result.status).send({ message: result.message });
+			}
+			return reply.send({
+				correct: result.correct,
+				...(result.explanation !== undefined ? { explanation: result.explanation } : {}),
+				...(result.alreadySolved !== undefined ? { alreadySolved: result.alreadySolved } : {}),
+			});
 		},
 	);
 

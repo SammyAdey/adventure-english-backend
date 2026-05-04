@@ -60,6 +60,9 @@ export default async function cohortRoutes(app: FastifyInstance) {
 						recommendedSessionsPerWeek: { type: "integer", minimum: 1 },
 						sessionCount: { type: "integer", minimum: 1 },
 						status: { type: "string", enum: ["draft", "open", "full", "completed", "cancelled"] },
+						termLabel: { type: "string" },
+						termStartsAt: { type: "string" },
+						termEndsAt: { type: "string" },
 					},
 				},
 			},
@@ -76,6 +79,9 @@ export default async function cohortRoutes(app: FastifyInstance) {
 					recommendedSessionsPerWeek: number;
 					sessionCount: number;
 					status?: "draft" | "open" | "full" | "completed" | "cancelled";
+					termLabel?: string;
+					termStartsAt?: string;
+					termEndsAt?: string;
 				};
 			}>,
 			reply,

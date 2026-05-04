@@ -3,6 +3,9 @@ import { connectToDatabase } from "../utils/mongo";
 import { getUserCollection, initUserCollection } from "../models/user.model";
 import type { EnrollmentDTO, LegacyInputRole, MongoUser, PurchasedCourseDTO, UserDTO, UserRole, UserStatus } from "../dto/users.dto";
 
+const purchaseRowKey = (p: Pick<PurchasedCourseDTO, "courseId" | "cohortId">): string =>
+	`${p.courseId}::${p.cohortId ?? ""}`;
+
 type CreateUserInput = {
 	firstName: string;
 	lastName: string;
@@ -74,15 +77,30 @@ const normalizeUpdate = (payload: UpdateUserInput) => {
 	return normalized;
 };
 
+const entitlementSourceFromPurchase = (purchase: PurchasedCourseDTO): EnrollmentDTO["entitlementSource"] => {
+	const src = purchase.purchaseSource;
+	if (src === "admin" || src === "dashboard") return "admin_grant";
+	if (src === "migration") return "migration";
+	return "purchase";
+};
+
 const upsertEnrollmentFromPurchase = (enrollments: EnrollmentDTO[] = [], purchase: PurchasedCourseDTO): EnrollmentDTO[] => {
-	const existingIndex = enrollments.findIndex((enrollment) => enrollment.courseId === purchase.courseId);
+	/** Semester-specific purchases only unlock a cohort seat via `enrollUserInCohort`, not a catalog enrollment row. */
+	if (purchase.cohortId) {
+		return enrollments;
+	}
+
+	const existingIndex = enrollments.findIndex(
+		(enrollment) => enrollment.courseId === purchase.courseId && !enrollment.cohortId,
+	);
 	const nextEnrollment: EnrollmentDTO = {
 		courseId: purchase.courseId,
 		enrolledAt: purchase.purchasedAt,
-		entitlementSource: "purchase",
+		entitlementSource: entitlementSourceFromPurchase(purchase),
 		status: purchase.accessStatus === "revoked" ? "revoked" : purchase.accessStatus === "refunded" ? "paused" : "active",
 		progressPercent: purchase.progressPercent ?? 0,
 		lastAccessedAt: purchase.lastAccessedAt,
+		accessExpiresAt: purchase.accessExpiresAt,
 	};
 
 	if (existingIndex === -1) {
@@ -262,7 +280,7 @@ export const addUserPurchase = async (
 	}
 
 	const purchases = existing.purchasedCourses ?? [];
-	const withoutCurrent = purchases.filter((entry) => entry.courseId !== purchase.courseId);
+	const withoutCurrent = purchases.filter((entry) => purchaseRowKey(entry) !== purchaseRowKey(purchase));
 	const nextPurchases = [...withoutCurrent, purchase];
 	const nextEnrollments = upsertEnrollmentFromPurchase(existing.enrollments ?? [], purchase);
 
@@ -385,6 +403,13 @@ export const getUserEnrolledCourses = async (email: string) => {
 				$or: [{ courseId: enrollment.courseId }, { slug: enrollment.courseId }],
 			});
 
+			const accessExpiresAt = enrollment.accessExpiresAt
+				? new Date(enrollment.accessExpiresAt).toISOString()
+				: undefined;
+			const accessExpired =
+				enrollment.accessExpiresAt != null &&
+				new Date(enrollment.accessExpiresAt).getTime() <= Date.now();
+
 			return {
 				id: enrollment.courseId,
 				cohortId: enrollment.cohortId,
@@ -395,6 +420,8 @@ export const getUserEnrolledCourses = async (email: string) => {
 				attendedSessions: enrollment.attendanceSummary?.attended ?? 0,
 				sessionsLeft: enrollment.attendanceSummary?.left ?? 0,
 				recommendedSessionsPerWeek: enrollment.recommendedSessionsPerWeek ?? 1,
+				accessExpiresAt,
+				accessExpired,
 			};
 		}),
 	);
@@ -417,15 +444,21 @@ export const updateUserCourseProgressByEmail = async (
 	}
 
 	const currentEnrollments = user.enrollments ?? [];
-	const enrollmentExists = currentEnrollments.some((entry) => entry.courseId === courseId);
-	if (!enrollmentExists) {
+	const now = new Date();
+	const enrollmentIndex = currentEnrollments.findIndex((entry) => {
+		if (entry.courseId !== courseId) return false;
+		const exp = entry.accessExpiresAt ? new Date(entry.accessExpiresAt).getTime() : undefined;
+		if (exp != null && exp <= now.getTime()) return false;
+		return true;
+	});
+	if (enrollmentIndex === -1) {
 		return null;
 	}
 
-	const now = new Date();
 	const boundedProgress = Math.max(0, Math.min(100, progressPercent));
-	const nextEnrollments = currentEnrollments.map((entry) =>
-		entry.courseId === courseId
+	const targetEnrollment = currentEnrollments[enrollmentIndex];
+	const nextEnrollments = currentEnrollments.map((entry, index) =>
+		index === enrollmentIndex
 			? {
 					...entry,
 					progressPercent: boundedProgress,
@@ -437,7 +470,7 @@ export const updateUserCourseProgressByEmail = async (
 	);
 
 	const nextPurchases = (user.purchasedCourses ?? []).map((purchase) =>
-		purchase.courseId === courseId
+		purchaseRowKey(purchase) === purchaseRowKey({ courseId, cohortId: targetEnrollment.cohortId })
 			? {
 					...purchase,
 					progressPercent: boundedProgress,
@@ -509,7 +542,14 @@ export const updateUserPurchase = async (
 	}
 
 	const purchases = existing.purchasedCourses ?? [];
-	const purchaseIndex = purchases.findIndex((entry) => entry.courseId === courseId);
+	const keyFromPatch = purchaseRowKey({
+		courseId,
+		cohortId: patch.cohortId ?? purchases.find((e) => e.courseId === courseId)?.cohortId,
+	});
+	let purchaseIndex = purchases.findIndex((entry) => purchaseRowKey(entry) === keyFromPatch);
+	if (purchaseIndex === -1) {
+		purchaseIndex = purchases.findIndex((entry) => entry.courseId === courseId);
+	}
 	if (purchaseIndex === -1) {
 		return null;
 	}

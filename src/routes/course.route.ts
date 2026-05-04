@@ -1,18 +1,22 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
+import type { LegacyInputRole } from "../dto/users.dto";
 import { CourseInputDTO } from "../dto/courses.dto";
 import { CourseValidationError } from "../services/course.service";
-import { getUserByEmail } from "../services/user.service";
+import { getUserByEmail, normalizeRole } from "../services/user.service";
 import {
 	addCourseReview,
 	createCourse,
 	deleteCourse,
+	adminEnrollUserInCourse,
 	getCourseById,
+	getCourseEnrolledLearners,
 	getCourseLearnerMetrics,
 	getCourseReviews,
 	getCourses,
 	updateCourse,
 } from "../services/course.service";
 import { requireRole, verifyAuthToken } from "../utils/auth";
+import { redactInteractiveCheckpointsOnCourse } from "../utils/interactive-checkpoint";
 import { logCourseMutationBody } from "../utils/log-course-body";
 
 const courseQuestionSchema = {
@@ -57,6 +61,7 @@ const courseVideoSchema = {
 	required: ["title", "videoUrl"],
 	additionalProperties: false,
 	properties: {
+		id: { type: "string", minLength: 1 },
 		title: { type: "string", minLength: 1 },
 		description: { type: "string" },
 		videoUrl: { type: "string", minLength: 1 },
@@ -68,11 +73,56 @@ const courseVideoSchema = {
 	},
 } as const;
 
+const courseWorksheetSchema = {
+	type: "object",
+	required: ["id", "title", "publicId", "mimeType"],
+	additionalProperties: false,
+	properties: {
+		id: { type: "string", minLength: 1 },
+		title: { type: "string", minLength: 1 },
+		publicId: { type: "string", minLength: 1 },
+		fileUrl: { type: "string", minLength: 1 },
+		fileName: { type: "string", minLength: 1 },
+		mimeType: { type: "string", enum: ["application/pdf"] },
+		unitId: { type: "string", minLength: 1 },
+		order: { type: "integer", minimum: 0 },
+	},
+} as const;
+
+const interactiveCheckpointPlacementSchema = {
+	type: "object",
+	required: ["mode", "unitId"],
+	additionalProperties: false,
+	properties: {
+		mode: { type: "string", enum: ["after_unit"] },
+		unitId: { type: "string", minLength: 1 },
+		order: { type: "integer", minimum: 0 },
+	},
+} as const;
+
+const interactiveCheckpointSchema = {
+	type: "object",
+	required: ["id", "questionKind", "placement", "payload"],
+	additionalProperties: false,
+	properties: {
+		id: { type: "string", minLength: 1 },
+		questionKind: {
+			type: "string",
+			enum: ["multiple_choice", "true_false", "short_answer", "select_all", "ordering"],
+		},
+		title: { type: "string" },
+		explanation: { type: "string" },
+		placement: interactiveCheckpointPlacementSchema,
+		payload: { type: "object", additionalProperties: true },
+	},
+} as const;
+
 const courseUnitSchema = {
 	type: "object",
 	required: ["title", "videos"],
 	additionalProperties: false,
 	properties: {
+		id: { type: "string", minLength: 1 },
 		title: { type: "string", minLength: 1 },
 		description: { type: "string" },
 		titles: localizedTitlesSchema,
@@ -108,6 +158,10 @@ const createCourseSchema = {
 				type: "string",
 				enum: ["online", "in_person"],
 			},
+			enrollmentAccessPeriod: {
+				type: "string",
+				enum: ["lifetime", "three_weeks", "one_quarter", "one_year"],
+			},
 			isRecommended: { type: "boolean" },
 			isSoldOut: { type: "boolean" },
 			maxEnrollments: { type: "integer", minimum: 1 },
@@ -129,6 +183,14 @@ const createCourseSchema = {
 			units: {
 				type: "array",
 				items: courseUnitSchema,
+			},
+			worksheets: {
+				type: "array",
+				items: courseWorksheetSchema,
+			},
+			interactiveCheckpoints: {
+				type: "array",
+				items: interactiveCheckpointSchema,
 			},
 			meta: {
 				type: "object",
@@ -219,6 +281,24 @@ const courseResponseSchema = {
 			type: "string",
 			enum: ["online", "in_person"],
 		},
+		enrollmentAccessPeriod: {
+			type: "string",
+			enum: ["lifetime", "three_weeks", "one_quarter", "one_year"],
+		},
+		cohortPurchaseOptions: {
+			type: "array",
+			items: {
+				type: "object",
+				required: ["cohortId", "name"],
+				additionalProperties: false,
+				properties: {
+					cohortId: { type: "string" },
+					name: { type: "string" },
+					termLabel: { type: "string" },
+					termEndsAt: { type: "string" },
+				},
+			},
+		},
 		isRecommended: { type: "boolean" },
 		isSoldOut: { type: "boolean" },
 		maxEnrollments: { type: "integer" },
@@ -238,6 +318,14 @@ const courseResponseSchema = {
 		units: {
 			type: "array",
 			items: courseUnitSchema,
+		},
+		worksheets: {
+			type: "array",
+			items: courseWorksheetSchema,
+		},
+		interactiveCheckpoints: {
+			type: "array",
+			items: interactiveCheckpointSchema,
 		},
 		meta: {
 			type: "object",
@@ -344,6 +432,66 @@ const courseLearnerMetricsResponseSchema = {
 	},
 } as const;
 
+const courseEnrolledLearnerEnrollmentResponseSchema = {
+	type: "object",
+	required: ["courseId", "enrolledAt"],
+	additionalProperties: false,
+	properties: {
+		courseId: { type: "string" },
+		cohortId: { type: "string" },
+		enrolledAt: { type: "string" },
+		status: { type: "string" },
+		progressPercent: { type: "number" },
+		entitlementSource: { type: "string" },
+		lastAccessedAt: { type: "string" },
+	},
+} as const;
+
+const courseEnrolledLearnerRowResponseSchema = {
+	type: "object",
+	required: ["userId", "firstName", "lastName", "email", "enrollment"],
+	additionalProperties: false,
+	properties: {
+		userId: { type: "string", minLength: 1 },
+		firstName: { type: "string" },
+		lastName: { type: "string" },
+		email: { type: "string" },
+		role: { type: "string" },
+		accountStatus: { type: "string" },
+		enrollment: courseEnrolledLearnerEnrollmentResponseSchema,
+	},
+} as const;
+
+const courseEnrolledLearnersResponseSchema = {
+	type: "object",
+	required: ["resolvedCourseId", "title", "totalMatching", "truncated", "learners"],
+	additionalProperties: false,
+	properties: {
+		resolvedCourseId: { type: "string" },
+		title: { type: "string" },
+		totalMatching: { type: "integer", minimum: 0 },
+		truncated: { type: "boolean" },
+		learners: {
+			type: "array",
+			items: courseEnrolledLearnerRowResponseSchema,
+		},
+	},
+} as const;
+
+const courseAdminEnrollBodySchema = {
+	type: "object",
+	required: ["userId"],
+	additionalProperties: false,
+	properties: {
+		userId: { type: "string", minLength: 24, maxLength: 24, pattern: "^[a-fA-F0-9]{24}$" },
+	},
+} as const;
+
+const adminEnrollUserResponseSchema = {
+	type: "object",
+	additionalProperties: true,
+} as const;
+
 const errorResponseSchema = {
 	type: "object",
 	required: ["message"],
@@ -409,6 +557,19 @@ const getEmailFromAuthHeader = (request: FastifyRequest, app: FastifyInstance): 
 	return decoded?.email ?? null;
 };
 
+const isCourseCatalogRequestPrivileged = async (
+	app: FastifyInstance,
+	request: FastifyRequest,
+): Promise<boolean> => {
+	const decoded = verifyAuthToken(app, request);
+	if (!decoded?.email) {
+		return false;
+	}
+	const user = await getUserByEmail(decoded.email);
+	const role = normalizeRole(user?.role as LegacyInputRole | undefined);
+	return role === "admin" || role === "instructor";
+};
+
 export default async function courseRoutes(app: FastifyInstance) {
 	app.post(
 		"/courses",
@@ -460,10 +621,12 @@ export default async function courseRoutes(app: FastifyInstance) {
 				},
 			},
 		},
-		async (_request, reply) => {
+		async (request, reply) => {
 			try {
+				const privileged = await isCourseCatalogRequestPrivileged(app, request);
 				const courses = await getCourses();
-				return reply.send({ courses });
+				const payload = privileged ? courses : courses.map(redactInteractiveCheckpointsOnCourse);
+				return reply.send({ courses: payload });
 			} catch (error) {
 				app.log.error({ err: error }, "Failed to list courses");
 				return reply
@@ -492,7 +655,8 @@ export default async function courseRoutes(app: FastifyInstance) {
 					return reply.status(404).send({ message: "Course not found" });
 				}
 
-				return reply.send(course);
+				const privileged = await isCourseCatalogRequestPrivileged(app, request);
+				return reply.send(privileged ? course : redactInteractiveCheckpointsOnCourse(course));
 			} catch (error) {
 				app.log.error({ err: error }, "Failed to fetch course");
 				return reply
@@ -532,6 +696,78 @@ export default async function courseRoutes(app: FastifyInstance) {
 				return reply
 					.status(500)
 					.send({ message: "Failed to fetch course stats", error: "COURSE_STATS_FAILED" });
+			}
+		},
+	);
+
+	app.get(
+		"/courses/:courseId/enrollments",
+		{
+			schema: {
+				params: courseIdParamSchema,
+				response: {
+					200: courseEnrolledLearnersResponseSchema,
+					401: errorResponseSchema,
+					403: errorResponseSchema,
+					404: errorResponseSchema,
+					500: errorResponseSchema,
+				},
+			},
+		},
+		async (request: FastifyRequest<{ Params: { courseId: string } }>, reply) => {
+			try {
+				const roleContext = await requireRole(app, request, reply, ["admin", "instructor"]);
+				if (!roleContext) return;
+
+				const payload = await getCourseEnrolledLearners(request.params.courseId);
+				if (!payload) {
+					return reply.status(404).send({ message: "Course not found" });
+				}
+
+				return reply.send(payload);
+			} catch (error) {
+				app.log.error({ err: error }, "Failed to fetch course enrollments");
+				return reply
+					.status(500)
+					.send({ message: "Failed to fetch course enrollments", error: "COURSE_ENROLLMENTS_LIST_FAILED" });
+			}
+		},
+	);
+
+	app.post(
+		"/courses/:courseId/enrollments",
+		{
+			schema: {
+				params: courseIdParamSchema,
+				body: courseAdminEnrollBodySchema,
+				response: {
+					200: adminEnrollUserResponseSchema,
+					401: errorResponseSchema,
+					403: errorResponseSchema,
+					404: errorResponseSchema,
+					500: errorResponseSchema,
+				},
+			},
+		},
+		async (
+			request: FastifyRequest<{ Params: { courseId: string }; Body: { userId: string } }>,
+			reply,
+		) => {
+			try {
+				const roleContext = await requireRole(app, request, reply, ["admin", "instructor"]);
+				if (!roleContext) return;
+
+				const updatedUser = await adminEnrollUserInCourse(request.body.userId, request.params.courseId);
+				if (!updatedUser) {
+					return reply.status(404).send({ message: "User or course not found" });
+				}
+
+				return reply.send(updatedUser);
+			} catch (error) {
+				app.log.error({ err: error }, "Failed to admin-enroll user in course");
+				return reply
+					.status(500)
+					.send({ message: "Failed to enroll user", error: "COURSE_ADMIN_ENROLL_FAILED" });
 			}
 		},
 	);

@@ -20,6 +20,16 @@ export interface PurchasedCourseDTO {
 	paymentStatus?: StripePaymentStatus;
 	progressPercent?: number;
 	lastAccessedAt?: Date;
+	/** In-person semester purchase: must match cohort when joining. */
+	cohortId?: string;
+	accessExpiresAt?: Date;
+}
+
+export interface CourseCheckpointAttemptStateDTO {
+	checkpointId: string;
+	lastCorrect: boolean;
+	attemptCount: number;
+	lastSubmittedAt?: Date;
 }
 
 export interface EnrollmentDTO {
@@ -29,6 +39,7 @@ export interface EnrollmentDTO {
 	entitlementSource?: "purchase" | "gift" | "admin_grant" | "migration";
 	status?: "active" | "completed" | "paused" | "revoked";
 	progressPercent?: number;
+	interactiveCheckpointAttempts?: CourseCheckpointAttemptStateDTO[];
 	attendanceSummary?: {
 		attended: number;
 		left: number;

@@ -1,6 +1,9 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
 import Stripe from "stripe";
 import { addUserPurchaseByEmail, getUserByEmail } from "../services/user.service";
+import { getCourseById } from "../services/course.service";
+import { getCohortByCohortIdForCourse } from "../services/cohort.service";
+import { computeEnrollmentAccessExpiresAt } from "../utils/enrollment-access";
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -61,9 +64,22 @@ export default async function stripeIntegrationRoutes(app: FastifyInstance) {
 				) {
 					const session = event.data.object as StripeCheckoutSessionShape;
 					const courseId = session.metadata?.courseId;
+					const cohortIdRaw = session.metadata?.cohortId?.trim();
+					const cohortId = cohortIdRaw || undefined;
 					const customerEmail = session.customer_details?.email ?? session.customer_email;
 
 					if (!courseId || !customerEmail) {
+						return reply.send({ received: true, skipped: true });
+					}
+
+					const course = await getCourseById(courseId);
+					if (!course) {
+						return reply.send({ received: true, skipped: true });
+					}
+
+					const deliveryMode = course.deliveryMode ?? "online";
+					if (deliveryMode === "in_person" && !cohortId) {
+						app.log.warn({ courseId }, "Stripe checkout missing cohortId for in_person course; skipping purchase");
 						return reply.send({ received: true, skipped: true });
 					}
 
@@ -83,9 +99,28 @@ export default async function stripeIntegrationRoutes(app: FastifyInstance) {
 								? Math.round((session.amount_total / 100) * 100) / 100
 								: undefined;
 
+						const purchasedAt = new Date();
+						let accessExpiresAt: Date | undefined;
+						let resolvedCohortId: string | undefined;
+
+						if (deliveryMode === "online") {
+							accessExpiresAt = computeEnrollmentAccessExpiresAt(
+								purchasedAt,
+								course.enrollmentAccessPeriod,
+							);
+						} else if (cohortId) {
+							const cohort = await getCohortByCohortIdForCourse(courseId, cohortId);
+							if (!cohort) {
+								app.log.warn({ courseId, cohortId }, "Stripe webhook cohort not found; skipping purchase");
+								return reply.send({ received: true, skipped: true });
+							}
+							resolvedCohortId = cohort.cohortId;
+							accessExpiresAt = cohort.termEndsAt ? new Date(cohort.termEndsAt) : undefined;
+						}
+
 						await addUserPurchaseByEmail(customerEmail, {
-							courseId,
-							purchasedAt: new Date(),
+							courseId: course.courseId ?? course.id,
+							purchasedAt,
 							amountPaid,
 							currency: session.currency?.toUpperCase(),
 							purchaseSource: "web",
@@ -100,6 +135,8 @@ export default async function stripeIntegrationRoutes(app: FastifyInstance) {
 								typeof session.customer === "string" ? session.customer : undefined,
 							paymentStatus: "succeeded",
 							progressPercent: 0,
+							...(resolvedCohortId ? { cohortId: resolvedCohortId } : {}),
+							...(accessExpiresAt ? { accessExpiresAt } : {}),
 						});
 					}
 				}

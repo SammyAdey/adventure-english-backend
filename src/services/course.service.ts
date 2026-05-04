@@ -11,16 +11,27 @@ import {
 	CourseReviewSummaryDTO,
 	CourseUnitDTO,
 	CourseVideoDTO,
+	CourseWorksheetDTO,
+	InteractiveCheckpointDTO,
 	InstructionalLanguage,
 	MongoCourse,
 	MongoCourseReview,
 } from "../dto/courses.dto";
+import type { EnrollmentDTO } from "../dto/users.dto";
 import { initCourseCollection, getCourseCollection } from "../models/course.model";
 import { getUserCollection, initUserCollection } from "../models/user.model";
 import { mongoCourseActiveFilter } from "../utils/course-active-filter";
+import { computeEnrollmentAccessExpiresAt } from "../utils/enrollment-access";
 import { logPreparedCourseDocument } from "../utils/log-course-body";
 import { connectToDatabase } from "../utils/mongo";
+import { addUserPurchase } from "./user.service";
+import type { UserDTO } from "../dto/users.dto";
 import { listCohortsByCourse } from "./cohort.service";
+import {
+	assertAuthoringCheckpointPayload,
+	collectUnitIdsFromCourseUnits,
+	isCheckpointQuestionKind,
+} from "../utils/interactive-checkpoint";
 
 export class CourseValidationError extends Error {
 	constructor(message: string) {
@@ -249,14 +260,27 @@ const normalizeUnitLocalized = (unit: CourseUnitDTO): CourseUnitDTO => {
 const normalizeUnitsFromPayload = (units: CourseUnitDTO[] = []): CourseUnitDTO[] =>
 	units.map((unit, unitIndex) => {
 		const withLocalized = normalizeUnitLocalized(unit);
+		const order = withLocalized.order ?? unitIndex;
+		const unitId =
+			typeof withLocalized.id === "string" && withLocalized.id.trim()
+				? withLocalized.id.trim()
+				: `unit-${order}`;
 		return {
 			...withLocalized,
-			order: withLocalized.order ?? unitIndex,
-			videos: withLocalized.videos.map((video, videoIndex) => ({
-				...video,
-				order: video.order ?? videoIndex,
-				isPreviewAvailable: video.isPreviewAvailable ?? false,
-			})),
+			id: unitId,
+			order,
+			videos: withLocalized.videos.map((video, videoIndex) => {
+				const vid =
+					typeof video.id === "string" && video.id.trim()
+						? video.id.trim()
+						: `${unitId}-lesson-${video.order ?? videoIndex}`;
+				return {
+					...video,
+					id: vid,
+					order: video.order ?? videoIndex,
+					isPreviewAvailable: video.isPreviewAvailable ?? false,
+				};
+			}),
 			questions: withLocalized.questions?.map((question) => ({
 				...question,
 			})),
@@ -286,7 +310,7 @@ const assertMandarinFieldsComplete = (units: CourseUnitDTO[], langs: Instruction
 	});
 };
 
-const mapVideoForResponse = (video: CourseVideoDTO): CourseVideoDTO => {
+const mapVideoForResponse = (video: CourseVideoDTO, unitId: string, videoIndex: number): CourseVideoDTO => {
 	const enTitle = video.title?.trim() ?? "";
 	const enUrl = video.videoUrl?.trim() ?? "";
 	const titles: NonNullable<CourseVideoDTO["titles"]> = {
@@ -297,8 +321,14 @@ const mapVideoForResponse = (video: CourseVideoDTO): CourseVideoDTO => {
 		en: video.videoUrls?.en?.trim() || enUrl,
 		...(video.videoUrls?.zh?.trim() ? { zh: video.videoUrls.zh.trim() } : {}),
 	};
+	const order = video.order ?? videoIndex;
+	const id =
+		typeof video.id === "string" && video.id.trim()
+			? video.id.trim()
+			: `${unitId}-lesson-${order}`;
 	return {
 		...video,
+		id,
 		title: titles.en,
 		videoUrl: videoUrls.en,
 		titles,
@@ -306,18 +336,126 @@ const mapVideoForResponse = (video: CourseVideoDTO): CourseVideoDTO => {
 	};
 };
 
-const mapUnitForResponse = (unit: CourseUnitDTO): CourseUnitDTO => {
+const mapUnitForResponse = (unit: CourseUnitDTO, unitIndex: number): CourseUnitDTO => {
 	const enTitle = unit.title?.trim() ?? "";
 	const titles: NonNullable<CourseUnitDTO["titles"]> = {
 		en: unit.titles?.en?.trim() || enTitle,
 		...(unit.titles?.zh?.trim() ? { zh: unit.titles.zh.trim() } : {}),
 	};
+	const order = unit.order ?? unitIndex;
+	const id =
+		typeof unit.id === "string" && unit.id.trim() ? unit.id.trim() : `unit-${order}`;
 	return {
 		...unit,
+		id,
 		title: titles.en,
 		titles,
-		videos: unit.videos.map(mapVideoForResponse),
+		videos: unit.videos.map((video, videoIndex) => mapVideoForResponse(video, id, videoIndex)),
 	};
+};
+
+const normalizeWorksheetsFromPayload = (worksheets: CourseWorksheetDTO[] = []): CourseWorksheetDTO[] => {
+	const normalized = worksheets
+		.map((w, index) => {
+			const id = String(w.id ?? "").trim();
+			const title = String(w.title ?? "").trim();
+			const publicId = String(w.publicId ?? "").trim();
+			if (!id || !title || !publicId) return null;
+			const out: CourseWorksheetDTO = {
+				id,
+				title,
+				publicId,
+				mimeType: "application/pdf",
+			};
+			if (typeof w.fileUrl === "string" && w.fileUrl.trim()) out.fileUrl = w.fileUrl.trim();
+			if (typeof w.fileName === "string" && w.fileName.trim()) out.fileName = w.fileName.trim();
+			if (typeof w.unitId === "string" && w.unitId.trim()) out.unitId = w.unitId.trim();
+			out.order = typeof w.order === "number" ? w.order : index;
+			return out;
+		})
+		.filter((w): w is CourseWorksheetDTO => w !== null);
+
+	return normalized.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+};
+
+const normalizeInteractiveCheckpointsFromPayload = (
+	checkpoints: InteractiveCheckpointDTO[] = [],
+	units: CourseUnitDTO[],
+): InteractiveCheckpointDTO[] => {
+	const unitIds = collectUnitIdsFromCourseUnits(units);
+	const normalized = checkpoints
+		.map((c, index) => {
+			const id = String(c.id ?? "").trim();
+			if (!id) return null;
+			if (!isCheckpointQuestionKind(c.questionKind)) return null;
+			const placement = c.placement;
+			if (!placement || placement.mode !== "after_unit") return null;
+			const unitId = String(placement.unitId ?? "").trim();
+			if (!unitId || !unitIds.has(unitId)) {
+				throw new CourseValidationError(
+					`Checkpoint "${id}" references unknown unit "${unitId}". Use each unit's id (see saved course or unit order id).`,
+				);
+			}
+			try {
+				assertAuthoringCheckpointPayload(c.questionKind, c.payload);
+			} catch (error) {
+				const msg = error instanceof Error ? error.message : "Invalid checkpoint payload";
+				throw new CourseValidationError(`Checkpoint "${id}": ${msg}`);
+			}
+			const out: InteractiveCheckpointDTO = {
+				id,
+				questionKind: c.questionKind,
+				placement: {
+					mode: "after_unit",
+					unitId,
+					order: typeof placement.order === "number" ? placement.order : index,
+				},
+				payload:
+					c.payload && typeof c.payload === "object"
+						? { ...(c.payload as Record<string, unknown>) }
+						: {},
+			};
+			if (typeof c.title === "string" && c.title.trim()) {
+				out.title = c.title.trim();
+			}
+			if (typeof c.explanation === "string" && c.explanation.trim()) {
+				out.explanation = c.explanation.trim();
+			}
+			return out;
+		})
+		.filter((c): c is InteractiveCheckpointDTO => c !== null);
+
+	return normalized.sort(
+		(a, b) => (a.placement.order ?? 0) - (b.placement.order ?? 0),
+	);
+};
+
+const coerceInteractiveCheckpointsFromMongo = (
+	raw: InteractiveCheckpointDTO[] | undefined | null,
+): InteractiveCheckpointDTO[] => {
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	const out: InteractiveCheckpointDTO[] = [];
+	for (const c of raw) {
+		if (!c || typeof c.id !== "string" || !c.id.trim()) continue;
+		if (!isCheckpointQuestionKind(c.questionKind)) continue;
+		const placement = c.placement;
+		if (!placement || placement.mode !== "after_unit") continue;
+		const unitId = String(placement.unitId ?? "").trim();
+		if (!unitId) continue;
+		out.push({
+			...c,
+			id: c.id.trim(),
+			placement: {
+				mode: "after_unit",
+				unitId,
+				order: typeof placement.order === "number" ? placement.order : undefined,
+			},
+			payload: c.payload && typeof c.payload === "object" ? { ...c.payload } : {},
+		});
+	}
+	return out;
 };
 
 const prepareCourseForPersistence = (
@@ -329,6 +467,11 @@ const prepareCourseForPersistence = (
 	const slug = payload.slug ? slugify(payload.slug) : slugify(payload.title);
 	const instructionalLanguages = normalizeInstructionalLanguages(payload.instructionalLanguages);
 	const units = normalizeUnitsFromPayload(payload.units ?? []);
+	const worksheets = normalizeWorksheetsFromPayload(payload.worksheets ?? []);
+	const interactiveCheckpoints = normalizeInteractiveCheckpointsFromPayload(
+		payload.interactiveCheckpoints ?? [],
+		units,
+	);
 	assertMandarinFieldsComplete(units, instructionalLanguages);
 
 	const { targets, target } = normalizeCourseTargetsFromPayload(payload);
@@ -357,6 +500,8 @@ const prepareCourseForPersistence = (
 		tags: payload.tags,
 		thumbnailUrl: payload.thumbnailUrl,
 		units,
+		worksheets,
+		interactiveCheckpoints,
 		pricing: payload.pricing,
 		reviews,
 		reviewSummary: calculateReviewSummary(reviews),
@@ -366,6 +511,10 @@ const prepareCourseForPersistence = (
 
 	if (metaPersisted != null) {
 		doc.meta = metaPersisted;
+	}
+
+	if (payload.enrollmentAccessPeriod !== undefined) {
+		doc.enrollmentAccessPeriod = payload.enrollmentAccessPeriod;
 	}
 
 	return doc;
@@ -401,13 +550,18 @@ const mapMongoCourseToDTO = (course: MongoCourse & { _id: ObjectId }): CourseDTO
 	category: course.category,
 	tags: course.tags,
 	thumbnailUrl: course.thumbnailUrl,
-	units: (course.units ?? []).map(mapUnitForResponse),
+	units: (course.units ?? []).map((unit, unitIndex) => mapUnitForResponse(unit, unitIndex)),
+	worksheets: normalizeWorksheetsFromPayload(course.worksheets ?? []),
+	interactiveCheckpoints: coerceInteractiveCheckpointsFromMongo(course.interactiveCheckpoints),
 	meta: course.meta,
 	pricing: course.pricing,
 	reviews: (course.reviews ?? []).map(mapMongoReviewToDTO),
 	reviewSummary: course.reviewSummary ?? calculateReviewSummary(course.reviews),
 	createdAt: course.createdAt,
 	updatedAt: course.updatedAt,
+	...(course.enrollmentAccessPeriod !== undefined
+		? { enrollmentAccessPeriod: course.enrollmentAccessPeriod }
+		: {}),
 };
 };
 
@@ -505,6 +659,14 @@ export const updateCourse = async (courseId: string, payload: CourseInputDTO): P
 	const now = new Date();
 	const instructionalLanguages = normalizeInstructionalLanguages(payload.instructionalLanguages);
 	const units = normalizeUnitsFromPayload(payload.units ?? []);
+	const worksheets =
+		payload.worksheets !== undefined
+			? normalizeWorksheetsFromPayload(payload.worksheets)
+			: undefined;
+	const interactiveCheckpoints =
+		payload.interactiveCheckpoints !== undefined
+			? normalizeInteractiveCheckpointsFromPayload(payload.interactiveCheckpoints, units)
+			: undefined;
 	assertMandarinFieldsComplete(units, instructionalLanguages);
 
 	const mergedMetaRaw: Partial<CourseMetaDTO> | undefined =
@@ -545,12 +707,18 @@ export const updateCourse = async (courseId: string, payload: CourseInputDTO): P
 		tags: payload.tags,
 		thumbnailUrl: payload.thumbnailUrl,
 		units,
+		...(worksheets !== undefined ? { worksheets } : {}),
+		...(interactiveCheckpoints !== undefined ? { interactiveCheckpoints } : {}),
 		pricing: payload.pricing !== undefined ? payload.pricing : existing.pricing,
 		updatedAt: now,
 	};
 
 	if (nextMeta != null) {
 		setFields.meta = nextMeta;
+	}
+
+	if (payload.enrollmentAccessPeriod !== undefined) {
+		setFields.enrollmentAccessPeriod = payload.enrollmentAccessPeriod;
 	}
 
 	await courseCollection.updateOne({ _id: existing._id }, { $set: setFields });
@@ -581,7 +749,19 @@ export const getCourseById = async (courseId: string): Promise<CourseDTO | null>
 		return null;
 	}
 
-	return mapMongoCourseToDTO(course);
+	const dto = mapMongoCourseToDTO(course);
+	if (dto.deliveryMode === "in_person") {
+		const cohorts = await listCohortsByCourse(courseId);
+		dto.cohortPurchaseOptions = cohorts
+			.filter((c) => c.status === "open")
+			.map((c) => ({
+				cohortId: c.cohortId,
+				name: c.name,
+				termLabel: c.termLabel,
+				termEndsAt: c.termEndsAt,
+			}));
+	}
+	return dto;
 };
 
 export const addCourseReview = async (courseId: string, payload: CourseReviewInputDTO): Promise<CourseReviewDTO | null> => {
@@ -741,4 +921,137 @@ export const getCourseLearnerMetrics = async (courseIdParam: string): Promise<Co
 		cohortCount: cohorts.length,
 		cohortSeatsReserved,
 	};
+};
+
+const MAX_ENROLLED_LEARNERS_EXPORT = 500;
+
+export type CourseEnrolledLearnerEnrollmentDTO = {
+	courseId: string;
+	cohortId?: string;
+	enrolledAt: string;
+	status?: string;
+	progressPercent?: number;
+	entitlementSource?: string;
+	lastAccessedAt?: string;
+};
+
+export type CourseEnrolledLearnerRowDTO = {
+	userId: string;
+	firstName: string;
+	lastName: string;
+	email: string;
+	role?: string;
+	accountStatus?: string;
+	enrollment: CourseEnrolledLearnerEnrollmentDTO;
+};
+
+export type CourseEnrolledLearnersResultDTO = {
+	resolvedCourseId: string;
+	title: string;
+	totalMatching: number;
+	truncated: boolean;
+	learners: CourseEnrolledLearnerRowDTO[];
+};
+
+const toIso = (value: Date | string | undefined): string | undefined => {
+	if (!value) return undefined;
+	if (value instanceof Date) return value.toISOString();
+	const d = new Date(value);
+	return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+};
+
+export const getCourseEnrolledLearners = async (courseIdParam: string): Promise<CourseEnrolledLearnersResultDTO | null> => {
+	const course = await findCourseDocumentByIdentifier(courseIdParam);
+	if (!course || !course._id) {
+		return null;
+	}
+
+	const aliasList = courseIdAliasesForUserMatching(course);
+	const aliasSet = new Set(aliasList);
+	const resolvedCourseId = course.courseId ?? course._id.toHexString();
+
+	const db = await connectToDatabase();
+	initUserCollection(db);
+	const usersCollection = getUserCollection();
+
+	const matchFilter = { enrollments: { $elemMatch: { courseId: { $in: aliasList } } } };
+
+	const [totalMatching, docs] = await Promise.all([
+		usersCollection.countDocuments(matchFilter),
+		usersCollection
+			.find(matchFilter)
+			.project({ firstName: 1, lastName: 1, email: 1, role: 1, status: 1, enrollments: 1 })
+			.sort({ email: 1 })
+			.limit(MAX_ENROLLED_LEARNERS_EXPORT + 1)
+			.toArray(),
+	]);
+
+	const truncated = docs.length > MAX_ENROLLED_LEARNERS_EXPORT;
+	const slice = truncated ? docs.slice(0, MAX_ENROLLED_LEARNERS_EXPORT) : docs;
+
+	const learners: CourseEnrolledLearnerRowDTO[] = [];
+	for (const doc of slice) {
+		if (!doc._id) continue;
+		const enrollments = doc.enrollments ?? [];
+		const enrollment = enrollments.find((e: EnrollmentDTO) => e.courseId && aliasSet.has(e.courseId));
+		if (!enrollment) continue;
+
+		const enrolledAt = toIso(enrollment.enrolledAt as Date | string | undefined) ?? new Date(0).toISOString();
+
+		learners.push({
+			userId: doc._id.toHexString(),
+			firstName: String(doc.firstName ?? ""),
+			lastName: String(doc.lastName ?? ""),
+			email: String(doc.email ?? ""),
+			role: doc.role ? String(doc.role) : undefined,
+			accountStatus: doc.status ? String(doc.status) : undefined,
+			enrollment: {
+				courseId: String(enrollment.courseId),
+				cohortId: enrollment.cohortId ? String(enrollment.cohortId) : undefined,
+				enrolledAt,
+				status: enrollment.status ? String(enrollment.status) : undefined,
+				progressPercent:
+					typeof enrollment.progressPercent === "number" ? enrollment.progressPercent : undefined,
+				entitlementSource: enrollment.entitlementSource ? String(enrollment.entitlementSource) : undefined,
+				lastAccessedAt: toIso(enrollment.lastAccessedAt as Date | string | undefined),
+			},
+		});
+	}
+
+	return {
+		resolvedCourseId,
+		title: course.title ?? resolvedCourseId,
+		totalMatching,
+		truncated,
+		learners,
+	};
+};
+
+/** Admin/instructor: grant course access and upsert enrollment (via purchase record). */
+export const adminEnrollUserInCourse = async (userId: string, courseIdentifier: string): Promise<UserDTO | null> => {
+	if (!ObjectId.isValid(userId)) {
+		return null;
+	}
+
+	const course = await findCourseDocumentByIdentifier(courseIdentifier);
+	if (!course || !course._id) {
+		return null;
+	}
+
+	const canonicalId = course.courseId ?? course._id.toHexString();
+	const purchasedAt = new Date();
+	const accessExpiresAt =
+		(course.deliveryMode ?? "online") === "online"
+			? computeEnrollmentAccessExpiresAt(purchasedAt, course.enrollmentAccessPeriod)
+			: undefined;
+
+	return addUserPurchase(userId, {
+		courseId: canonicalId,
+		purchasedAt,
+		purchaseSource: "admin",
+		accessStatus: "active",
+		paymentStatus: "succeeded",
+		progressPercent: 0,
+		...(accessExpiresAt ? { accessExpiresAt } : {}),
+	});
 };

@@ -14,6 +14,11 @@ export interface CohortDTO {
 	enrollmentCount: number;
 	recommendedSessionsPerWeek: number;
 	sessionCount: number;
+	/** e.g. "2026 Semester 1" */
+	termLabel?: string;
+	termStartsAt?: Date;
+	/** Drives in-person enrollment `accessExpiresAt`. */
+	termEndsAt?: Date;
 	status: CohortStatus;
 	createdAt: Date;
 	updatedAt: Date;
@@ -57,6 +62,10 @@ export interface CohortCreateInputDTO {
 	recommendedSessionsPerWeek: number;
 	sessionCount: number;
 	status?: CohortStatus;
+	termLabel?: string;
+	/** ISO string or Date from admin clients. */
+	termStartsAt?: Date | string;
+	termEndsAt?: Date | string;
 }
 
 export interface SessionCreateInputDTO {
