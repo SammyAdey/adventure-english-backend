@@ -18,6 +18,7 @@ const app = Fastify({ logger: true });
 const defaultCorsOrigins = [
 	"https://www.adventureenglish.com",
 	"https://adventureenglish.com",
+	"https://adventure-english-dasboard.vercel.app",
 	"http://localhost:3000",
 	"http://localhost:3001",
 	// Same hosts as above; browsers treat localhost and 127.0.0.1 as different origins.
