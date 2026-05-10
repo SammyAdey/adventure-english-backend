@@ -32,7 +32,10 @@ export type CheckpointQuestionKind =
 	| "select_all"
 	| "ordering";
 
-export type InteractiveCheckpointPlacement = { mode: "after_unit"; unitId: string; order?: number };
+export type InteractiveCheckpointPlacement =
+	| { mode: "after_unit"; unitId: string; order?: number }
+	| { mode: "mid_video"; videoId: string; triggerAtSeconds: number; order?: number }
+	| { mode: "after_video"; videoId: string; order?: number };
 
 export interface InteractiveCheckpointDTO {
 	id: string;
@@ -50,6 +53,8 @@ export interface CourseVideoDTO {
 	title: string;
 	description?: string;
 	videoUrl: string;
+	/** Cloudinary stream/public identifier used to issue secure short-lived playback URLs. */
+	streamPublicId?: string;
 	/** Localized lesson titles; legacy `title` is canonical English when absent. */
 	titles?: LocalizedTitlesDTO;
 	/** Per-language video URLs; legacy `videoUrl` is canonical English when absent. */

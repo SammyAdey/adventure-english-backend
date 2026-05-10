@@ -100,6 +100,7 @@ export default async function authRoutes(app: FastifyInstance) {
 			email: user.email,
 			firstName: user.firstName,
 			lastName: user.lastName,
+			role: user.role ?? "student",
 			token,
 		});
 	});

@@ -118,7 +118,7 @@ const upsertEnrollmentFromPurchase = (enrollments: EnrollmentDTO[] = [], purchas
 	);
 };
 
-const mapMongoUserToDTO = (user: MongoUser & { _id: ObjectId }): UserDTO => ({
+export const mapMongoUserToDTO = (user: MongoUser & { _id: ObjectId }): UserDTO => ({
 	id: user._id.toHexString(),
 	firstName: user.firstName,
 	lastName: user.lastName,

@@ -3,7 +3,7 @@ import type { CourseCheckpointAttemptStateDTO, EnrollmentDTO } from "../dto/user
 import { getUserCollection, initUserCollection } from "../models/user.model";
 import { connectToDatabase } from "../utils/mongo";
 import {
-	getAfterUnitCheckpointIdsForUnit,
+	getCheckpointIdsForUnit,
 	gradeCheckpointAttempt,
 } from "../utils/interactive-checkpoint";
 import { getCourseById } from "./course.service";
@@ -103,6 +103,53 @@ export async function submitInteractiveCheckpointAttempt(
 	return { ok: true, correct, explanation };
 }
 
+/** Removes stored progress for one checkpoint so the learner can answer again. */
+export async function resetInteractiveCheckpointProgressForUser(
+	email: string,
+	courseIdOrSlug: string,
+	checkpointId: string,
+): Promise<{ ok: true } | { ok: false; status: number; code: string; message: string }> {
+	const course = await getCourseById(courseIdOrSlug);
+	if (!course) {
+		return { ok: false, status: 404, code: "COURSE_NOT_FOUND", message: "Course not found" };
+	}
+	const checkpointExists = (course.interactiveCheckpoints ?? []).some((c) => c.id === checkpointId);
+	if (!checkpointExists) {
+		return { ok: false, status: 404, code: "CHECKPOINT_NOT_FOUND", message: "Checkpoint not found" };
+	}
+
+	const db = await connectToDatabase();
+	initUserCollection(db);
+	const usersCollection = getUserCollection();
+	const userDoc = await usersCollection.findOne({ email });
+	if (!userDoc?._id) {
+		return { ok: false, status: 401, code: "UNAUTHORIZED", message: "User not found" };
+	}
+
+	const enrollments = userDoc.enrollments ?? [];
+	const enrollmentIndex = enrollments.findIndex(
+		(e) => enrollmentMatchesCourse(e, course) && isEnrollmentActiveForCheckpoints(e),
+	);
+	if (enrollmentIndex === -1) {
+		return { ok: false, status: 403, code: "NOT_ENTITLED", message: "No active enrollment for this course" };
+	}
+
+	const enrollment = enrollments[enrollmentIndex];
+	const attempts = enrollment.interactiveCheckpointAttempts ?? [];
+	const nextAttempts = attempts.filter((a) => a.checkpointId !== checkpointId);
+
+	const nextEnrollments = enrollments.map((e, i) =>
+		i === enrollmentIndex ? { ...e, interactiveCheckpointAttempts: nextAttempts } : e,
+	);
+
+	await usersCollection.updateOne(
+		{ _id: userDoc._id },
+		{ $set: { enrollments: nextEnrollments, updatedAt: new Date() } },
+	);
+
+	return { ok: true };
+}
+
 export type CourseCheckpointProgressDTO = {
 	solvedCheckpointIds: string[];
 	unitProgress: Array<{
@@ -150,7 +197,7 @@ export async function getInteractiveCheckpointProgressForUser(
 
 	const unitProgress = (course.units ?? []).map((unit) => {
 		const unitId = typeof unit.id === "string" && unit.id.trim() ? unit.id.trim() : "";
-		const checkpointIds = unitId ? getAfterUnitCheckpointIdsForUnit(course, unitId) : [];
+		const checkpointIds = unitId ? getCheckpointIdsForUnit(course, unitId) : [];
 		const complete =
 			checkpointIds.length > 0 && checkpointIds.every((id) => solved.has(id));
 		return { unitId: unitId || `unit-${unit.order ?? 0}`, complete, checkpointIds };

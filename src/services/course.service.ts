@@ -17,14 +17,15 @@ import {
 	MongoCourse,
 	MongoCourseReview,
 } from "../dto/courses.dto";
-import type { EnrollmentDTO } from "../dto/users.dto";
+import type { EnrollmentDTO, MongoUser } from "../dto/users.dto";
 import { initCourseCollection, getCourseCollection } from "../models/course.model";
+import { getCohortCollection, initCohortCollection } from "../models/cohort.model";
 import { getUserCollection, initUserCollection } from "../models/user.model";
 import { mongoCourseActiveFilter } from "../utils/course-active-filter";
 import { computeEnrollmentAccessExpiresAt } from "../utils/enrollment-access";
 import { logPreparedCourseDocument } from "../utils/log-course-body";
 import { connectToDatabase } from "../utils/mongo";
-import { addUserPurchase } from "./user.service";
+import { addUserPurchase, mapMongoUserToDTO } from "./user.service";
 import type { UserDTO } from "../dto/users.dto";
 import { listCohortsByCourse } from "./cohort.service";
 import {
@@ -238,6 +239,9 @@ const normalizeVideoLocalized = (video: CourseVideoDTO): CourseVideoDTO => {
 		...video,
 		title: enTitle,
 		videoUrl: enUrl,
+		...(typeof video.streamPublicId === "string" && video.streamPublicId.trim()
+			? { streamPublicId: video.streamPublicId.trim() }
+			: {}),
 		titles,
 		videoUrls,
 	};
@@ -331,6 +335,9 @@ const mapVideoForResponse = (video: CourseVideoDTO, unitId: string, videoIndex: 
 		id,
 		title: titles.en,
 		videoUrl: videoUrls.en,
+		...(typeof video.streamPublicId === "string" && video.streamPublicId.trim()
+			? { streamPublicId: video.streamPublicId.trim() }
+			: {}),
 		titles,
 		videoUrls,
 	};
@@ -383,33 +390,77 @@ const normalizeInteractiveCheckpointsFromPayload = (
 	units: CourseUnitDTO[],
 ): InteractiveCheckpointDTO[] => {
 	const unitIds = collectUnitIdsFromCourseUnits(units);
+	const videoToUnit = new Map<string, string>();
+	for (const unit of units) {
+		const unitId = typeof unit.id === "string" && unit.id.trim() ? unit.id.trim() : "";
+		for (const video of unit.videos ?? []) {
+			const videoId = typeof video.id === "string" && video.id.trim() ? video.id.trim() : "";
+			if (unitId && videoId) videoToUnit.set(videoId, unitId);
+		}
+	}
 	const normalized = checkpoints
 		.map((c, index) => {
 			const id = String(c.id ?? "").trim();
 			if (!id) return null;
 			if (!isCheckpointQuestionKind(c.questionKind)) return null;
 			const placement = c.placement;
-			if (!placement || placement.mode !== "after_unit") return null;
-			const unitId = String(placement.unitId ?? "").trim();
-			if (!unitId || !unitIds.has(unitId)) {
-				throw new CourseValidationError(
-					`Checkpoint "${id}" references unknown unit "${unitId}". Use each unit's id (see saved course or unit order id).`,
-				);
-			}
+			if (!placement) return null;
 			try {
 				assertAuthoringCheckpointPayload(c.questionKind, c.payload);
 			} catch (error) {
 				const msg = error instanceof Error ? error.message : "Invalid checkpoint payload";
 				throw new CourseValidationError(`Checkpoint "${id}": ${msg}`);
 			}
-			const out: InteractiveCheckpointDTO = {
-				id,
-				questionKind: c.questionKind,
-				placement: {
+			let normalizedPlacement: InteractiveCheckpointDTO["placement"] | null = null;
+			if (placement.mode === "after_unit") {
+				const unitId = String(placement.unitId ?? "").trim();
+				if (!unitId || !unitIds.has(unitId)) {
+					throw new CourseValidationError(
+						`Checkpoint "${id}" references unknown unit "${unitId}". Use each unit's id (see saved course or unit order id).`,
+					);
+				}
+				normalizedPlacement = {
 					mode: "after_unit",
 					unitId,
 					order: typeof placement.order === "number" ? placement.order : index,
-				},
+				};
+			} else if (placement.mode === "mid_video") {
+				const videoId = String(placement.videoId ?? "").trim();
+				if (!videoId || !videoToUnit.has(videoId)) {
+					throw new CourseValidationError(
+						`Checkpoint "${id}" references unknown video "${videoId}". Save lessons first and use lesson id for mid-video placement.`,
+					);
+				}
+				const triggerAtSeconds = Number(placement.triggerAtSeconds);
+				if (!Number.isFinite(triggerAtSeconds) || triggerAtSeconds < 0) {
+					throw new CourseValidationError(
+						`Checkpoint "${id}" has invalid triggerAtSeconds. Use a non-negative number.`,
+					);
+				}
+				normalizedPlacement = {
+					mode: "mid_video",
+					videoId,
+					triggerAtSeconds,
+					order: typeof placement.order === "number" ? placement.order : index,
+				};
+			} else if (placement.mode === "after_video") {
+				const videoId = String(placement.videoId ?? "").trim();
+				if (!videoId || !videoToUnit.has(videoId)) {
+					throw new CourseValidationError(
+						`Checkpoint "${id}" references unknown video "${videoId}". Save lessons first and use lesson id for after-lesson placement.`,
+					);
+				}
+				normalizedPlacement = {
+					mode: "after_video",
+					videoId,
+					order: typeof placement.order === "number" ? placement.order : index,
+				};
+			}
+			if (!normalizedPlacement) return null;
+			const out: InteractiveCheckpointDTO = {
+				id,
+				questionKind: c.questionKind,
+				placement: normalizedPlacement,
 				payload:
 					c.payload && typeof c.payload === "object"
 						? { ...(c.payload as Record<string, unknown>) }
@@ -441,17 +492,40 @@ const coerceInteractiveCheckpointsFromMongo = (
 		if (!c || typeof c.id !== "string" || !c.id.trim()) continue;
 		if (!isCheckpointQuestionKind(c.questionKind)) continue;
 		const placement = c.placement;
-		if (!placement || placement.mode !== "after_unit") continue;
-		const unitId = String(placement.unitId ?? "").trim();
-		if (!unitId) continue;
-		out.push({
-			...c,
-			id: c.id.trim(),
-			placement: {
+		if (!placement) continue;
+		let nextPlacement: InteractiveCheckpointDTO["placement"] | null = null;
+		if (placement.mode === "after_unit") {
+			const unitId = String(placement.unitId ?? "").trim();
+			if (!unitId) continue;
+			nextPlacement = {
 				mode: "after_unit",
 				unitId,
 				order: typeof placement.order === "number" ? placement.order : undefined,
-			},
+			};
+		} else if (placement.mode === "mid_video") {
+			const videoId = String(placement.videoId ?? "").trim();
+			const triggerAtSeconds = Number(placement.triggerAtSeconds);
+			if (!videoId || !Number.isFinite(triggerAtSeconds) || triggerAtSeconds < 0) continue;
+			nextPlacement = {
+				mode: "mid_video",
+				videoId,
+				triggerAtSeconds,
+				order: typeof placement.order === "number" ? placement.order : undefined,
+			};
+		} else if (placement.mode === "after_video") {
+			const videoId = String(placement.videoId ?? "").trim();
+			if (!videoId) continue;
+			nextPlacement = {
+				mode: "after_video",
+				videoId,
+				order: typeof placement.order === "number" ? placement.order : undefined,
+			};
+		}
+		if (!nextPlacement) continue;
+		out.push({
+			...c,
+			id: c.id.trim(),
+			placement: nextPlacement,
 			payload: c.payload && typeof c.payload === "object" ? { ...c.payload } : {},
 		});
 	}
@@ -1054,4 +1128,112 @@ export const adminEnrollUserInCourse = async (userId: string, courseIdentifier: 
 		progressPercent: 0,
 		...(accessExpiresAt ? { accessExpiresAt } : {}),
 	});
+};
+
+/** Admin/instructor: remove all access to this course — matching enrollment rows and purchase lines (including cohort purchases). */
+export const adminUnenrollUserFromCourse = async (
+	userId: string,
+	courseIdentifier: string,
+): Promise<UserDTO | null> => {
+	if (!ObjectId.isValid(userId)) {
+		return null;
+	}
+
+	const course = await findCourseDocumentByIdentifier(courseIdentifier);
+	if (!course || !course._id) {
+		return null;
+	}
+
+	const aliasList = courseIdAliasesForUserMatching(course);
+	const aliasSet = new Set(aliasList.map(String));
+	const resolvedCourseId = course.courseId ?? course._id.toHexString();
+
+	const matchesCourse = (courseId: unknown): boolean =>
+		typeof courseId === "string" && aliasSet.has(courseId);
+
+	const db = await connectToDatabase();
+	initUserCollection(db);
+	initCohortCollection(db);
+	const usersCollection = getUserCollection();
+	const cohortCollection = getCohortCollection();
+
+	const existing = await usersCollection.findOne({ _id: new ObjectId(userId) });
+	if (!existing || !existing._id) {
+		return null;
+	}
+
+	const prevEnrollments = existing.enrollments ?? [];
+	const cohortIdsToRelease = new Set<string>();
+	for (const e of prevEnrollments) {
+		if (e.courseId && matchesCourse(e.courseId) && e.cohortId) {
+			cohortIdsToRelease.add(String(e.cohortId));
+		}
+	}
+
+	const nextEnrollments = prevEnrollments.filter((e) => !(e.courseId && matchesCourse(e.courseId)));
+	const prevPurchases = existing.purchasedCourses ?? [];
+	const nextPurchases = prevPurchases.filter((p) => !(p.courseId && matchesCourse(p.courseId)));
+
+	const changed =
+		nextEnrollments.length !== prevEnrollments.length || nextPurchases.length !== prevPurchases.length;
+	if (!changed) {
+		return null;
+	}
+
+	const result = await usersCollection.findOneAndUpdate(
+		{ _id: new ObjectId(userId) },
+		{
+			$set: {
+				enrollments: nextEnrollments,
+				purchasedCourses: nextPurchases,
+				enrolledCourseCount: nextEnrollments.length,
+				updatedAt: new Date(),
+			},
+		},
+		{ returnDocument: "after" },
+	);
+
+	if (!result || !result._id) {
+		return null;
+	}
+
+	for (const cohortId of cohortIdsToRelease) {
+		const cohortDoc = await cohortCollection.findOne({ cohortId, courseId: resolvedCourseId });
+		if (!cohortDoc || !cohortDoc._id) continue;
+		const current = cohortDoc.enrollmentCount ?? 0;
+		if (current <= 0) continue;
+
+		const nextCount = current - 1;
+		await cohortCollection.updateOne(
+			{ _id: cohortDoc._id },
+			{
+				$set: {
+					enrollmentCount: nextCount,
+					updatedAt: new Date(),
+					...(nextCount < cohortDoc.maxEnrollments ? { status: "open" as const } : {}),
+				},
+			},
+		);
+	}
+
+	if ((course.maxEnrollments ?? 0) > 0) {
+		const cohortAgg = await cohortCollection
+			.aggregate<{ total: number }>([
+				{ $match: { courseId: resolvedCourseId } },
+				{ $group: { _id: null, total: { $sum: "$enrollmentCount" } } },
+			])
+			.toArray();
+		const totalEnrolled = cohortAgg[0]?.total ?? 0;
+		await db.collection<MongoCourse>("courses").updateOne(
+			{ _id: course._id },
+			{
+				$set: {
+					isSoldOut: totalEnrolled >= (course.maxEnrollments ?? 0),
+					updatedAt: new Date(),
+				},
+			},
+		);
+	}
+
+	return mapMongoUserToDTO(result as MongoUser & { _id: ObjectId });
 };

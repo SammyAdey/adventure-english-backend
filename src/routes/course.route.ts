@@ -8,6 +8,7 @@ import {
 	createCourse,
 	deleteCourse,
 	adminEnrollUserInCourse,
+	adminUnenrollUserFromCourse,
 	getCourseById,
 	getCourseEnrolledLearners,
 	getCourseLearnerMetrics,
@@ -65,6 +66,7 @@ const courseVideoSchema = {
 		title: { type: "string", minLength: 1 },
 		description: { type: "string" },
 		videoUrl: { type: "string", minLength: 1 },
+		streamPublicId: { type: "string", minLength: 1 },
 		titles: localizedTitlesSchema,
 		videoUrls: localizedVideoUrlsSchema,
 		order: { type: "integer", minimum: 0 },
@@ -90,14 +92,39 @@ const courseWorksheetSchema = {
 } as const;
 
 const interactiveCheckpointPlacementSchema = {
-	type: "object",
-	required: ["mode", "unitId"],
-	additionalProperties: false,
-	properties: {
-		mode: { type: "string", enum: ["after_unit"] },
-		unitId: { type: "string", minLength: 1 },
-		order: { type: "integer", minimum: 0 },
-	},
+	anyOf: [
+		{
+			type: "object",
+			required: ["mode", "unitId"],
+			additionalProperties: false,
+			properties: {
+				mode: { type: "string", enum: ["after_unit"] },
+				unitId: { type: "string", minLength: 1 },
+				order: { type: "integer", minimum: 0 },
+			},
+		},
+		{
+			type: "object",
+			required: ["mode", "videoId", "triggerAtSeconds"],
+			additionalProperties: false,
+			properties: {
+				mode: { type: "string", enum: ["mid_video"] },
+				videoId: { type: "string", minLength: 1 },
+				triggerAtSeconds: { type: "number", minimum: 0 },
+				order: { type: "integer", minimum: 0 },
+			},
+		},
+		{
+			type: "object",
+			required: ["mode", "videoId"],
+			additionalProperties: false,
+			properties: {
+				mode: { type: "string", enum: ["after_video"] },
+				videoId: { type: "string", minLength: 1 },
+				order: { type: "integer", minimum: 0 },
+			},
+		},
+	],
 } as const;
 
 const interactiveCheckpointSchema = {
@@ -403,6 +430,16 @@ const courseIdParamSchema = {
 	required: ["courseId"],
 	properties: {
 		courseId: { type: "string", minLength: 1 },
+	},
+} as const;
+
+const courseUserEnrollmentParamsSchema = {
+	type: "object",
+	required: ["courseId", "userId"],
+	additionalProperties: false,
+	properties: {
+		courseId: { type: "string", minLength: 1 },
+		userId: { type: "string", minLength: 24, maxLength: 24, pattern: "^[a-fA-F0-9]{24}$" },
 	},
 } as const;
 
@@ -768,6 +805,40 @@ export default async function courseRoutes(app: FastifyInstance) {
 				return reply
 					.status(500)
 					.send({ message: "Failed to enroll user", error: "COURSE_ADMIN_ENROLL_FAILED" });
+			}
+		},
+	);
+
+	app.delete(
+		"/courses/:courseId/enrollments/:userId",
+		{
+			schema: {
+				params: courseUserEnrollmentParamsSchema,
+				response: {
+					200: adminEnrollUserResponseSchema,
+					401: errorResponseSchema,
+					403: errorResponseSchema,
+					404: errorResponseSchema,
+					500: errorResponseSchema,
+				},
+			},
+		},
+		async (request: FastifyRequest<{ Params: { courseId: string; userId: string } }>, reply) => {
+			try {
+				const roleContext = await requireRole(app, request, reply, ["admin"]);
+				if (!roleContext) return;
+
+				const updatedUser = await adminUnenrollUserFromCourse(request.params.userId, request.params.courseId);
+				if (!updatedUser) {
+					return reply.status(404).send({ message: "User not enrolled in this course, or user/course not found" });
+				}
+
+				return reply.send(updatedUser);
+			} catch (error) {
+				app.log.error({ err: error }, "Failed to admin-unenroll user from course");
+				return reply
+					.status(500)
+					.send({ message: "Failed to remove enrollment", error: "COURSE_ADMIN_UNENROLL_FAILED" });
 			}
 		},
 	);

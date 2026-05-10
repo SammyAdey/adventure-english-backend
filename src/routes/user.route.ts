@@ -15,8 +15,10 @@ import {
 } from "../services/user.service";
 import {
 	getInteractiveCheckpointProgressForUser,
+	resetInteractiveCheckpointProgressForUser,
 	submitInteractiveCheckpointAttempt,
 } from "../services/checkpoint-progress.service";
+import { getSecureCourseVideoPlaybackUrlForUser } from "../services/video-playback.service";
 import { requireRole, verifyAuthToken } from "../utils/auth";
 
 const purchasedCourseSchema = {
@@ -296,6 +298,43 @@ const checkpointAttemptResponseSchema = {
 	},
 } as const;
 
+const checkpointResetProgressResponseSchema = {
+	type: "object",
+	required: ["ok"],
+	additionalProperties: false,
+	properties: {
+		ok: { type: "boolean" },
+	},
+} as const;
+
+const playbackUrlParamsSchema = {
+	type: "object",
+	required: ["courseId", "videoId"],
+	properties: {
+		courseId: { type: "string", minLength: 1 },
+		videoId: { type: "string", minLength: 1 },
+	},
+} as const;
+
+const playbackUrlQuerySchema = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		lang: { type: "string", enum: ["en", "zh"] },
+	},
+} as const;
+
+const playbackUrlResponseSchema = {
+	type: "object",
+	required: ["url", "source"],
+	additionalProperties: false,
+	properties: {
+		url: { type: "string", minLength: 1 },
+		expiresAt: { type: "string" },
+		source: { type: "string", enum: ["signed_stream", "stream_url", "legacy_url"] },
+	},
+} as const;
+
 const meCourseItemSchema = {
 	type: "object",
 	required: [
@@ -552,6 +591,77 @@ export default async function userRoutes(app: FastifyInstance) {
 				correct: result.correct,
 				...(result.explanation !== undefined ? { explanation: result.explanation } : {}),
 				...(result.alreadySolved !== undefined ? { alreadySolved: result.alreadySolved } : {}),
+			});
+		},
+	);
+
+	app.delete(
+		"/users/me/courses/:courseId/checkpoints/:checkpointId/progress",
+		{
+			schema: {
+				params: checkpointAttemptParamsSchema,
+				response: {
+					200: checkpointResetProgressResponseSchema,
+					401: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+					403: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+					404: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+				},
+			},
+		},
+		async (
+			request: FastifyRequest<{ Params: { courseId: string; checkpointId: string } }>,
+			reply,
+		) => {
+			const email = getEmailFromAuthHeader(request, app);
+			if (!email) return reply.status(401).send({ message: "Unauthorized" });
+			const result = await resetInteractiveCheckpointProgressForUser(
+				email,
+				request.params.courseId,
+				request.params.checkpointId,
+			);
+			if (!result.ok) {
+				return reply.status(result.status).send({ message: result.message });
+			}
+			return reply.send({ ok: true });
+		},
+	);
+
+	app.get(
+		"/users/me/courses/:courseId/videos/:videoId/playback-url",
+		{
+			schema: {
+				params: playbackUrlParamsSchema,
+				querystring: playbackUrlQuerySchema,
+				response: {
+					200: playbackUrlResponseSchema,
+					401: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+					403: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+					404: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+				},
+			},
+		},
+		async (
+			request: FastifyRequest<{
+				Params: { courseId: string; videoId: string };
+				Querystring: { lang?: "en" | "zh" };
+			}>,
+			reply,
+		) => {
+			const email = getEmailFromAuthHeader(request, app);
+			if (!email) return reply.status(401).send({ message: "Unauthorized" });
+			const result = await getSecureCourseVideoPlaybackUrlForUser(
+				email,
+				request.params.courseId,
+				request.params.videoId,
+				request.query.lang === "zh" ? "zh" : "en",
+			);
+			if (!result.ok) {
+				return reply.status(result.status).send({ message: result.message });
+			}
+			return reply.send({
+				url: result.url,
+				source: result.source,
+				...(result.expiresAt ? { expiresAt: result.expiresAt } : {}),
 			});
 		},
 	);

@@ -136,11 +136,29 @@ export function redactInteractiveCheckpointsOnCourse(course: CourseDTO): CourseD
 	};
 }
 
-export function getAfterUnitCheckpointIdsForUnit(course: CourseDTO, unitId: string): string[] {
+export function getCheckpointIdsForUnit(course: CourseDTO, unitId: string): string[] {
+	const videoIdsInUnit = new Set<string>();
+	for (const unit of course.units ?? []) {
+		if (unit.id !== unitId) continue;
+		for (const video of unit.videos ?? []) {
+			if (typeof video.id === "string" && video.id.trim()) {
+				videoIdsInUnit.add(video.id.trim());
+			}
+		}
+	}
 	const ids: string[] = [];
 	for (const c of course.interactiveCheckpoints ?? []) {
-		if (c.placement.mode !== "after_unit") continue;
-		if (c.placement.unitId === unitId) ids.push(c.id);
+		if (c.placement.mode === "after_unit" && c.placement.unitId === unitId) {
+			ids.push(c.id);
+			continue;
+		}
+		if (c.placement.mode === "mid_video" && videoIdsInUnit.has(c.placement.videoId)) {
+			ids.push(c.id);
+			continue;
+		}
+		if (c.placement.mode === "after_video" && videoIdsInUnit.has(c.placement.videoId)) {
+			ids.push(c.id);
+		}
 	}
 	return ids;
 }
