@@ -134,6 +134,8 @@ export const mapMongoUserToDTO = (user: MongoUser & { _id: ObjectId }): UserDTO 
 	status: user.status,
 	enrolledCourseCount: user.enrolledCourseCount ?? user.enrollments?.length ?? user.purchasedCourses?.length ?? 0,
 	lastLoginAt: user.lastLoginAt,
+	studyStreakDays: user.studyStreakDays,
+	lastStudyStreakUtcDate: user.lastStudyStreakUtcDate,
 });
 
 export const listUsers = async (): Promise<UserDTO[]> => {
@@ -376,12 +378,17 @@ export const getUserDashboardSummary = async (email: string): Promise<DashboardS
 		mode: "In person" as const,
 	}));
 
+	const streakDays =
+		typeof user.studyStreakDays === "number" && Number.isFinite(user.studyStreakDays) && user.studyStreakDays > 0
+			? user.studyStreakDays
+			: 0;
+
 	return {
 		stats: {
 			enrolledCourses: enrollments.length,
 			lessonsCompleted,
 			studyHoursThisMonth: Math.round(lessonsCompleted * 0.75),
-			streakDays: Math.min(30, Math.max(1, enrollments.length * 2)),
+			streakDays,
 		},
 		upcomingBookings,
 	};
@@ -428,6 +435,70 @@ export const getUserEnrolledCourses = async (email: string) => {
 
 	return result;
 };
+
+const MS_PER_UTC_DAY = 86_400_000;
+
+function utcCalendarDateString(d: Date): string {
+	return d.toISOString().slice(0, 10);
+}
+
+function addCalendarDaysUtc(yyyyMmDd: string, deltaDays: number): string {
+	const y = parseInt(yyyyMmDd.slice(0, 4), 10);
+	const mo = parseInt(yyyyMmDd.slice(5, 7), 10);
+	const day = parseInt(yyyyMmDd.slice(8, 10), 10);
+	const t = Date.UTC(y, mo - 1, day);
+	return utcCalendarDateString(new Date(t + deltaDays * MS_PER_UTC_DAY));
+}
+
+/**
+ * Call after meaningful study activity (checkpoint/progress/video). Idempotent per UTC day.
+ * - Same UTC day as `lastStudyStreakUtcDate`: streak unchanged, no write.
+ * - Previous UTC day: increment streak.
+ * - Older gap or first activity: streak resets to 1.
+ */
+export async function touchUserStudyStreak(email: string): Promise<number | null> {
+	const db = await connectToDatabase();
+	initUserCollection(db);
+	const usersCollection = getUserCollection();
+	const userDoc = await usersCollection.findOne({ email });
+	if (!userDoc?._id) {
+		return null;
+	}
+
+	const today = utcCalendarDateString(new Date());
+	const prevLast =
+		typeof userDoc.lastStudyStreakUtcDate === "string" && userDoc.lastStudyStreakUtcDate.trim().length >= 10
+			? userDoc.lastStudyStreakUtcDate.trim().slice(0, 10)
+			: undefined;
+	const prevStreak =
+		typeof userDoc.studyStreakDays === "number" &&
+		Number.isFinite(userDoc.studyStreakDays) &&
+		userDoc.studyStreakDays > 0
+			? userDoc.studyStreakDays
+			: 0;
+
+	if (prevLast === today) {
+		return Math.max(1, prevStreak);
+	}
+
+	let nextStreak: number;
+	if (!prevLast) {
+		nextStreak = 1;
+	} else if (prevLast === addCalendarDaysUtc(today, -1)) {
+		nextStreak = prevStreak > 0 ? prevStreak + 1 : 1;
+	} else {
+		nextStreak = 1;
+	}
+
+	const capped = Math.min(nextStreak, 3650);
+
+	await usersCollection.updateOne(
+		{ _id: userDoc._id },
+		{ $set: { studyStreakDays: capped, lastStudyStreakUtcDate: today, updatedAt: new Date() } },
+	);
+
+	return capped;
+}
 
 export const updateUserCourseProgressByEmail = async (
 	email: string,
@@ -495,7 +566,13 @@ export const updateUserCourseProgressByEmail = async (
 		return null;
 	}
 
-	return mapMongoUserToDTO(result as MongoUser & { _id: ObjectId });
+	const mapped = mapMongoUserToDTO(result as MongoUser & { _id: ObjectId });
+	try {
+		await touchUserStudyStreak(email);
+	} catch (err) {
+		console.warn("[study-streak] touch failed after course progress update", err);
+	}
+	return mapped;
 };
 
 export const getUserActivityFeed = async (email: string) => {

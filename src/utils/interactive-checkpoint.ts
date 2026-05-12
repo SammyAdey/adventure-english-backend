@@ -163,6 +163,23 @@ export function getCheckpointIdsForUnit(course: CourseDTO, unitId: string): stri
 	return ids;
 }
 
+/** Checkpoints tied to a single lesson video (in-video and after-video). */
+export function getCheckpointIdsForVideo(course: CourseDTO, videoId: string): string[] {
+	const vid = typeof videoId === "string" ? videoId.trim() : "";
+	if (!vid) return [];
+	const ids: string[] = [];
+	for (const c of course.interactiveCheckpoints ?? []) {
+		if (c.placement.mode === "mid_video" && c.placement.videoId === vid) {
+			ids.push(c.id);
+			continue;
+		}
+		if (c.placement.mode === "after_video" && c.placement.videoId === vid) {
+			ids.push(c.id);
+		}
+	}
+	return ids;
+}
+
 export function collectUnitIdsFromCourseUnits(units: CourseUnitDTO[]): Set<string> {
 	const set = new Set<string>();
 	units.forEach((u, i) => {

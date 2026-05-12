@@ -4,9 +4,11 @@ import { getUserCollection, initUserCollection } from "../models/user.model";
 import { connectToDatabase } from "../utils/mongo";
 import {
 	getCheckpointIdsForUnit,
+	getCheckpointIdsForVideo,
 	gradeCheckpointAttempt,
 } from "../utils/interactive-checkpoint";
 import { getCourseById } from "./course.service";
+import { updateUserCourseProgressByEmail } from "./user.service";
 
 const courseAliases = (course: CourseDTO): Set<string> => {
 	const set = new Set<string>();
@@ -31,6 +33,30 @@ const isEnrollmentActiveForCheckpoints = (enrollment: EnrollmentDTO): boolean =>
 	}
 	return true;
 };
+
+/** Share of course interactive checkpoints answered correctly at least once (ties `progressPercent` to checkpoints). */
+export function computeCheckpointBasedProgressPercent(
+	course: CourseDTO,
+	attempts: CourseCheckpointAttemptStateDTO[] | undefined,
+): number {
+	const checkpoints = course.interactiveCheckpoints ?? [];
+	const validIds = new Set(checkpoints.map((c) => c.id));
+	const list = attempts ?? [];
+	const solved = list.filter((a) => a.lastCorrect && validIds.has(a.checkpointId)).length;
+	const total = checkpoints.length;
+	if (total === 0) return 100;
+	return Math.max(0, Math.min(100, Math.round((solved / total) * 100)));
+}
+
+async function syncEnrollmentProgressPercentFromCheckpointAttempts(
+	email: string,
+	course: CourseDTO,
+	enrollmentCourseId: string,
+	attempts: CourseCheckpointAttemptStateDTO[],
+): Promise<void> {
+	const pct = computeCheckpointBasedProgressPercent(course, attempts);
+	await updateUserCourseProgressByEmail(email, enrollmentCourseId, pct);
+}
 
 export async function submitInteractiveCheckpointAttempt(
 	email: string,
@@ -100,6 +126,14 @@ export async function submitInteractiveCheckpointAttempt(
 		{ $set: { enrollments: nextEnrollments, updatedAt: new Date() } },
 	);
 
+	const attemptsAfter = nextEnrollments[enrollmentIndex].interactiveCheckpointAttempts ?? [];
+	await syncEnrollmentProgressPercentFromCheckpointAttempts(
+		email,
+		course,
+		enrollment.courseId,
+		attemptsAfter,
+	);
+
 	return { ok: true, correct, explanation };
 }
 
@@ -147,7 +181,81 @@ export async function resetInteractiveCheckpointProgressForUser(
 		{ $set: { enrollments: nextEnrollments, updatedAt: new Date() } },
 	);
 
+	const attemptsAfter = nextEnrollments[enrollmentIndex].interactiveCheckpointAttempts ?? [];
+	await syncEnrollmentProgressPercentFromCheckpointAttempts(
+		email,
+		course,
+		enrollment.courseId,
+		attemptsAfter,
+	);
+
 	return { ok: true };
+}
+
+/** Clears stored attempts for every checkpoint on this lesson video (mid + after video). */
+export async function resetInteractiveCheckpointProgressForLessonVideo(
+	email: string,
+	courseIdOrSlug: string,
+	videoId: string,
+): Promise<
+	| { ok: true; resetCount: number }
+	| { ok: false; status: number; code: string; message: string }
+> {
+	const course = await getCourseById(courseIdOrSlug);
+	if (!course) {
+		return { ok: false, status: 404, code: "COURSE_NOT_FOUND", message: "Course not found" };
+	}
+
+	const videoExists = (course.units ?? []).some((unit) =>
+		(unit.videos ?? []).some((v) => typeof v.id === "string" && v.id.trim() === videoId.trim()),
+	);
+	if (!videoExists) {
+		return { ok: false, status: 404, code: "VIDEO_NOT_FOUND", message: "Lesson video not found on this course" };
+	}
+
+	const lessonCheckpointIds = getCheckpointIdsForVideo(course, videoId);
+	const removeSet = new Set(lessonCheckpointIds);
+
+	const db = await connectToDatabase();
+	initUserCollection(db);
+	const usersCollection = getUserCollection();
+	const userDoc = await usersCollection.findOne({ email });
+	if (!userDoc?._id) {
+		return { ok: false, status: 401, code: "UNAUTHORIZED", message: "User not found" };
+	}
+
+	const enrollments = userDoc.enrollments ?? [];
+	const enrollmentIndex = enrollments.findIndex(
+		(e) => enrollmentMatchesCourse(e, course) && isEnrollmentActiveForCheckpoints(e),
+	);
+	if (enrollmentIndex === -1) {
+		return { ok: false, status: 403, code: "NOT_ENTITLED", message: "No active enrollment for this course" };
+	}
+
+	const enrollment = enrollments[enrollmentIndex];
+	const attempts = enrollment.interactiveCheckpointAttempts ?? [];
+	const before = attempts.length;
+	const nextAttempts = attempts.filter((a) => !removeSet.has(a.checkpointId));
+	const resetCount = before - nextAttempts.length;
+
+	const nextEnrollments = enrollments.map((e, i) =>
+		i === enrollmentIndex ? { ...e, interactiveCheckpointAttempts: nextAttempts } : e,
+	);
+
+	await usersCollection.updateOne(
+		{ _id: userDoc._id },
+		{ $set: { enrollments: nextEnrollments, updatedAt: new Date() } },
+	);
+
+	const attemptsAfter = nextEnrollments[enrollmentIndex].interactiveCheckpointAttempts ?? [];
+	await syncEnrollmentProgressPercentFromCheckpointAttempts(
+		email,
+		course,
+		enrollment.courseId,
+		attemptsAfter,
+	);
+
+	return { ok: true, resetCount };
 }
 
 export type CourseCheckpointProgressDTO = {

@@ -68,6 +68,10 @@ export interface UserDTO {
 	status?: UserStatus;
 	enrolledCourseCount?: number;
 	lastLoginAt?: Date;
+	/** Consecutive UTC calendar days with recorded study activity (see `touchUserStudyStreak`). */
+	studyStreakDays?: number;
+	/** Last UTC date (`YYYY-MM-DD`) when `studyStreakDays` was advanced or reset. */
+	lastStudyStreakUtcDate?: string;
 }
 
 // This is the shape of the document stored in MongoDB

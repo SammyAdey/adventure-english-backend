@@ -15,6 +15,7 @@ import {
 } from "../services/user.service";
 import {
 	getInteractiveCheckpointProgressForUser,
+	resetInteractiveCheckpointProgressForLessonVideo,
 	resetInteractiveCheckpointProgressForUser,
 	submitInteractiveCheckpointAttempt,
 } from "../services/checkpoint-progress.service";
@@ -304,6 +305,16 @@ const checkpointResetProgressResponseSchema = {
 	additionalProperties: false,
 	properties: {
 		ok: { type: "boolean" },
+	},
+} as const;
+
+const checkpointResetLessonProgressResponseSchema = {
+	type: "object",
+	required: ["ok", "resetCount"],
+	additionalProperties: false,
+	properties: {
+		ok: { type: "boolean" },
+		resetCount: { type: "integer", minimum: 0 },
 	},
 } as const;
 
@@ -623,6 +634,34 @@ export default async function userRoutes(app: FastifyInstance) {
 				return reply.status(result.status).send({ message: result.message });
 			}
 			return reply.send({ ok: true });
+		},
+	);
+
+	app.delete(
+		"/users/me/courses/:courseId/videos/:videoId/checkpoint-progress",
+		{
+			schema: {
+				params: playbackUrlParamsSchema,
+				response: {
+					200: checkpointResetLessonProgressResponseSchema,
+					401: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+					403: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+					404: { type: "object", required: ["message"], properties: { message: { type: "string" } } },
+				},
+			},
+		},
+		async (request: FastifyRequest<{ Params: { courseId: string; videoId: string } }>, reply) => {
+			const email = getEmailFromAuthHeader(request, app);
+			if (!email) return reply.status(401).send({ message: "Unauthorized" });
+			const result = await resetInteractiveCheckpointProgressForLessonVideo(
+				email,
+				request.params.courseId,
+				request.params.videoId,
+			);
+			if (!result.ok) {
+				return reply.status(result.status).send({ message: result.message });
+			}
+			return reply.send({ ok: true, resetCount: result.resetCount });
 		},
 	);
 

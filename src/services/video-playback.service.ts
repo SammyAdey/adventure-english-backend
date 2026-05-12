@@ -4,6 +4,7 @@ import { getUserCollection, initUserCollection } from "../models/user.model";
 import { buildCloudflarePlaybackUrl } from "../utils/cloudflare-stream";
 import { connectToDatabase } from "../utils/mongo";
 import { getCourseById } from "./course.service";
+import { touchUserStudyStreak } from "./user.service";
 
 const courseAliases = (course: CourseDTO): Set<string> => {
 	const set = new Set<string>();
@@ -79,10 +80,17 @@ export async function getSecureCourseVideoPlaybackUrlForUser(
 		return { ok: false, status: 403, code: "NOT_ENTITLED", message: "No active enrollment for this course" };
 	}
 
+	const recordStudySession = () => {
+		void touchUserStudyStreak(email).catch((err) => {
+			console.warn("[study-streak] touch failed after playback grant", err);
+		});
+	};
+
 	const streamPublicId = video.streamPublicId?.trim();
 	if (streamPublicId) {
 		const signed = await buildCloudflarePlaybackUrl(streamPublicId);
 		if (signed) {
+			recordStudySession();
 			return {
 				ok: true,
 				url: signed.url,
@@ -96,5 +104,6 @@ export async function getSecureCourseVideoPlaybackUrlForUser(
 	if (!fallbackUrl) {
 		return { ok: false, status: 404, code: "VIDEO_URL_MISSING", message: "No playable URL configured for this lesson" };
 	}
+	recordStudySession();
 	return { ok: true, url: fallbackUrl, source: "legacy_url" };
 }
