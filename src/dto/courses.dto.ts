@@ -25,6 +25,12 @@ export interface LocalizedVideoUrlsDTO {
 	zh?: string;
 }
 
+/** Marketing feature bullets per language; legacy `meta.features` is canonical English when absent. */
+export interface LocalizedFeaturesDTO {
+	en?: string[];
+	zh?: string[];
+}
+
 export type CheckpointQuestionKind =
 	| "multiple_choice"
 	| "true_false"
@@ -110,6 +116,8 @@ export interface CourseMetaDTO {
 	includes?: string[];
 	/** Short bullet points for marketing / course cards (separate from `includes` purchase perks). */
 	features?: string[];
+	/** Localized marketing bullets; legacy `features` is canonical English when absent. */
+	featuresByLanguage?: LocalizedFeaturesDTO;
 }
 
 export interface CoursePricingDTO {
@@ -141,8 +149,12 @@ export interface CourseReviewSummaryDTO {
 
 export interface CourseInputDTO {
 	title: string;
+	/** Localized display titles; legacy `title` is canonical English when absent. */
+	titles?: LocalizedTitlesDTO;
 	slug?: string;
 	summary?: string;
+	/** Localized summaries; legacy `summary` is canonical English when absent. */
+	summaries?: LocalizedTitlesDTO;
 	/** Languages instructional content is offered in (at least one of en, zh). */
 	instructionalLanguages: InstructionalLanguage[];
 	deliveryMode?: CourseDeliveryMode;

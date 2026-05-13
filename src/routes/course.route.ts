@@ -57,6 +57,15 @@ const localizedVideoUrlsSchema = {
 	},
 } as const;
 
+const localizedFeaturesSchema = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		en: { type: "array", items: { type: "string" } },
+		zh: { type: "array", items: { type: "string" } },
+	},
+} as const;
+
 const courseVideoSchema = {
 	type: "object",
 	required: ["title", "videoUrl"],
@@ -173,8 +182,10 @@ const createCourseSchema = {
 		additionalProperties: false,
 		properties: {
 			title: { type: "string", minLength: 1 },
+			titles: localizedTitlesSchema,
 			slug: { type: "string", minLength: 1 },
 			summary: { type: "string" },
+			summaries: localizedTitlesSchema,
 			instructionalLanguages: {
 				type: "array",
 				minItems: 1,
@@ -245,6 +256,7 @@ const createCourseSchema = {
 						type: "array",
 						items: { type: "string" },
 					},
+					featuresByLanguage: localizedFeaturesSchema,
 				},
 			},
 			pricing: {
@@ -296,8 +308,10 @@ const courseResponseSchema = {
 		id: { type: "string" },
 		courseId: { type: "string" },
 		title: { type: "string" },
+		titles: localizedTitlesSchema,
 		slug: { type: "string" },
 		summary: { type: "string" },
+		summaries: localizedTitlesSchema,
 		instructionalLanguages: {
 			type: "array",
 			minItems: 1,
@@ -379,6 +393,7 @@ const courseResponseSchema = {
 					type: "array",
 					items: { type: "string" },
 				},
+				featuresByLanguage: localizedFeaturesSchema,
 			},
 			additionalProperties: false,
 		},

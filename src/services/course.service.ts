@@ -14,6 +14,7 @@ import {
 	CourseWorksheetDTO,
 	InteractiveCheckpointDTO,
 	InstructionalLanguage,
+	LocalizedTitlesDTO,
 	MongoCourse,
 	MongoCourseReview,
 } from "../dto/courses.dto";
@@ -137,6 +138,7 @@ const META_PERSIST_KEYS: (keyof CourseMetaDTO)[] = [
 	"durationInMinutes",
 	"includes",
 	"features",
+	"featuresByLanguage",
 ];
 
 const META_NUMERIC_KEYS = new Set<string>([
@@ -165,6 +167,20 @@ const pickMetaForPersistence = (meta: Partial<CourseMetaDTO> | undefined | null)
 		}
 		if (key === "features" && Array.isArray(v)) {
 			out.features = v.filter((item) => item != null).map((item) => String(item));
+			continue;
+		}
+		if (key === "featuresByLanguage" && v && typeof v === "object" && !Array.isArray(v)) {
+			const o = v as Record<string, unknown>;
+			const en = Array.isArray(o.en)
+				? o.en.filter((item) => item != null).map((item) => String(item).trim()).filter(Boolean)
+				: undefined;
+			const zh = Array.isArray(o.zh)
+				? o.zh.filter((item) => item != null).map((item) => String(item).trim()).filter(Boolean)
+				: undefined;
+			const fb: NonNullable<CourseMetaDTO["featuresByLanguage"]> = {};
+			if (en?.length) fb.en = en;
+			if (zh?.length) fb.zh = zh;
+			if (Object.keys(fb).length) out.featuresByLanguage = fb;
 			continue;
 		}
 		if ((key === "audioLanguages" || key === "subtitleLanguages" || key === "includes") && Array.isArray(v)) {
@@ -291,8 +307,39 @@ const normalizeUnitsFromPayload = (units: CourseUnitDTO[] = []): CourseUnitDTO[]
 		};
 	});
 
-const assertMandarinFieldsComplete = (units: CourseUnitDTO[], langs: InstructionalLanguage[]): void => {
+const normalizeCourseRootLocalized = (
+	payload: CourseInputDTO,
+): { title: string; titles: LocalizedTitlesDTO; summary?: string; summaries?: LocalizedTitlesDTO } => {
+	const titleEn = payload.title.trim();
+	const titles: LocalizedTitlesDTO = {
+		en: payload.titles?.en?.trim() || titleEn,
+		...(payload.titles?.zh?.trim() ? { zh: payload.titles.zh.trim() } : {}),
+	};
+	const legacySummary = typeof payload.summary === "string" ? payload.summary.trim() : "";
+	const summariesEn = payload.summaries?.en?.trim() || legacySummary;
+	const summariesZh = payload.summaries?.zh?.trim();
+	let summaries: LocalizedTitlesDTO | undefined;
+	if (summariesEn || summariesZh) {
+		summaries = {
+			en: summariesEn || summariesZh || "",
+			...(summariesZh ? { zh: summariesZh } : {}),
+		};
+	}
+	const summary = summariesEn || undefined;
+	return { title: titles.en, titles, summary, summaries };
+};
+
+const assertMandarinFieldsComplete = (
+	courseTitles: LocalizedTitlesDTO,
+	units: CourseUnitDTO[],
+	langs: InstructionalLanguage[],
+): void => {
 	if (!langs.includes("zh")) return;
+	if (!courseTitles.zh?.trim()) {
+		throw new CourseValidationError(
+			"Mandarin (zh) course title is required when Mandarin is an instructional language.",
+		);
+	}
 	units.forEach((unit, ui) => {
 		if (!unit.titles?.zh?.trim()) {
 			throw new CourseValidationError(
@@ -546,7 +593,8 @@ const prepareCourseForPersistence = (
 		payload.interactiveCheckpoints ?? [],
 		units,
 	);
-	assertMandarinFieldsComplete(units, instructionalLanguages);
+	const courseRoot = normalizeCourseRootLocalized(payload);
+	assertMandarinFieldsComplete(courseRoot.titles, units, instructionalLanguages);
 
 	const { targets, target } = normalizeCourseTargetsFromPayload(payload);
 	if (targets.length === 0) {
@@ -558,8 +606,10 @@ const prepareCourseForPersistence = (
 	/** Do not spread `payload` — Fastify/Ajv may leave `meta: {}` or odd shapes; build the document explicitly. */
 	const doc: Omit<MongoCourse, "_id"> = {
 		courseId,
-		title: payload.title,
-		summary: payload.summary,
+		title: courseRoot.title,
+		titles: courseRoot.titles,
+		summary: courseRoot.summary,
+		...(courseRoot.summaries ? { summaries: courseRoot.summaries } : {}),
 		slug,
 		instructionalLanguages,
 		deliveryMode: payload.deliveryMode ?? "online",
@@ -604,14 +654,49 @@ const mapMongoReviewToDTO = (review: MongoCourseReview): CourseReviewDTO => ({
 	createdAt: review.createdAt ?? new Date(),
 });
 
+const normalizeCourseMetaForDto = (meta: CourseMetaDTO | undefined | null): CourseMetaDTO | undefined => {
+	if (!meta || typeof meta !== "object") return undefined;
+	const fb = meta.featuresByLanguage;
+	const mergedFeatures =
+		Array.isArray(meta.features) && meta.features.length > 0
+			? meta.features
+			: fb?.en && fb.en.length > 0
+				? fb.en
+				: meta.features;
+	return {
+		...meta,
+		...(mergedFeatures?.length ? { features: mergedFeatures } : {}),
+	};
+};
+
 const mapMongoCourseToDTO = (course: MongoCourse & { _id: ObjectId }): CourseDTO => {
 	const { targets, target } = deriveTargetsFromMongoCourse(course);
+	const titleEn = course.title?.trim() ?? "";
+	const storedTitles = course.titles;
+	const titles: LocalizedTitlesDTO = {
+		en: storedTitles?.en?.trim() || titleEn,
+		...(storedTitles?.zh?.trim() ? { zh: storedTitles.zh.trim() } : {}),
+	};
+	const summaryEn = typeof course.summary === "string" ? course.summary.trim() : "";
+	const rawSummaries = (course as MongoCourse & { summaries?: LocalizedTitlesDTO | null }).summaries;
+	let summaries: LocalizedTitlesDTO | undefined;
+	if (rawSummaries && typeof rawSummaries === "object") {
+		const en = rawSummaries.en?.trim() || summaryEn;
+		const zh = rawSummaries.zh?.trim();
+		if (en || zh) {
+			summaries = { en: en || zh || "", ...(zh ? { zh } : {}) };
+		}
+	} else if (summaryEn) {
+		summaries = { en: summaryEn };
+	}
 	return {
 	id: course.courseId ?? course._id.toHexString(),
 	courseId: course.courseId,
-	title: course.title,
+	title: titles.en,
+	titles,
 	slug: course.slug,
-	summary: course.summary,
+	summary: summaries?.en || summaryEn || undefined,
+	summaries,
 	instructionalLanguages: normalizeInstructionalLanguages(course.instructionalLanguages),
 	deliveryMode: course.deliveryMode ?? "online",
 	isRecommended: course.isRecommended ?? false,
@@ -627,7 +712,7 @@ const mapMongoCourseToDTO = (course: MongoCourse & { _id: ObjectId }): CourseDTO
 	units: (course.units ?? []).map((unit, unitIndex) => mapUnitForResponse(unit, unitIndex)),
 	worksheets: normalizeWorksheetsFromPayload(course.worksheets ?? []),
 	interactiveCheckpoints: coerceInteractiveCheckpointsFromMongo(course.interactiveCheckpoints),
-	meta: course.meta,
+	meta: normalizeCourseMetaForDto(course.meta),
 	pricing: course.pricing,
 	reviews: (course.reviews ?? []).map(mapMongoReviewToDTO),
 	reviewSummary: course.reviewSummary ?? calculateReviewSummary(course.reviews),
@@ -741,7 +826,8 @@ export const updateCourse = async (courseId: string, payload: CourseInputDTO): P
 		payload.interactiveCheckpoints !== undefined
 			? normalizeInteractiveCheckpointsFromPayload(payload.interactiveCheckpoints, units)
 			: undefined;
-	assertMandarinFieldsComplete(units, instructionalLanguages);
+	const courseRoot = normalizeCourseRootLocalized(payload);
+	assertMandarinFieldsComplete(courseRoot.titles, units, instructionalLanguages);
 
 	const mergedMetaRaw: Partial<CourseMetaDTO> | undefined =
 		payload.meta !== undefined && payload.meta !== null
@@ -765,9 +851,11 @@ export const updateCourse = async (courseId: string, payload: CourseInputDTO): P
 	});
 
 	const setFields: Record<string, unknown> = {
-		title: payload.title,
+		title: courseRoot.title,
+		titles: courseRoot.titles,
+		summary: courseRoot.summary,
+		summaries: courseRoot.summaries ?? null,
 		slug,
-		summary: payload.summary,
 		instructionalLanguages,
 		deliveryMode: payload.deliveryMode ?? existing.deliveryMode ?? "online",
 		isRecommended,
