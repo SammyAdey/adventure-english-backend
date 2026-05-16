@@ -318,7 +318,7 @@ type DashboardSummary = {
 		title: string;
 		dateLabel: string;
 		timeLabel: string;
-		mode: "Video" | "In person";
+		mode: "Video" | "Tutoring";
 	}>;
 };
 
@@ -364,7 +364,7 @@ export const getUserDashboardSummary = async (email: string): Promise<DashboardS
 
 	const upcomingBookings = upcomingSessionDocs.map((session) => ({
 		id: `${session.cohortId}-${session.startsAt.toISOString()}`,
-		title: "In-person cohort session",
+		title: "Tutoring session",
 		dateLabel: session.startsAt.toLocaleDateString("en-AU", {
 			weekday: "short",
 			day: "numeric",
@@ -375,7 +375,7 @@ export const getUserDashboardSummary = async (email: string): Promise<DashboardS
 			hour: "numeric",
 			minute: "2-digit",
 		}),
-		mode: "In person" as const,
+		mode: "Tutoring" as const,
 	}));
 
 	const streakDays =

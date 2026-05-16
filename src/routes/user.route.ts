@@ -472,7 +472,7 @@ export default async function userRoutes(app: FastifyInstance) {
 										title: { type: "string" },
 										dateLabel: { type: "string" },
 										timeLabel: { type: "string" },
-										mode: { type: "string", enum: ["Video", "In person"] },
+										mode: { type: "string", enum: ["Video", "Tutoring"] },
 									},
 								},
 							},
