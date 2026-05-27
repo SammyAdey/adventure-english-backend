@@ -4,6 +4,7 @@ import { addUserPurchaseByEmail, getUserByEmail } from "../services/user.service
 import { getCourseById } from "../services/course.service";
 import { getCohortByCohortIdForCourse } from "../services/cohort.service";
 import { computeEnrollmentAccessExpiresAt } from "../utils/enrollment-access";
+import { sendPurchaseConfirmationEmail } from "../services/mail.service";
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -137,6 +138,14 @@ export default async function stripeIntegrationRoutes(app: FastifyInstance) {
 							progressPercent: 0,
 							...(resolvedCohortId ? { cohortId: resolvedCohortId } : {}),
 							...(accessExpiresAt ? { accessExpiresAt } : {}),
+						});
+
+						void sendPurchaseConfirmationEmail({
+							to: customerEmail,
+							courseTitle: course.title,
+							courseUrl: `https://adventureenglish.com/en/courses/${encodeURIComponent(course.courseId ?? course.id)}`,
+							amountPaid,
+							currency: session.currency ?? undefined,
 						});
 					}
 				}

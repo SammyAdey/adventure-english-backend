@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest } from "fastify";
 import { connectToDatabase } from "../utils/mongo";
 import { getUserCollection, initUserCollection } from "../models/user.model";
 import { hashPassword, isPasswordHash, verifyPassword } from "../utils/password";
+import { sendWelcomeEmail } from "../services/mail.service";
 
 interface LoginBody {
 	email: string;
@@ -134,6 +135,12 @@ export default async function authRoutes(app: FastifyInstance) {
 			userId: result.insertedId.toHexString(),
 			email,
 			role: "student",
+		});
+
+		void sendWelcomeEmail({
+			to: email,
+			firstName,
+			loginUrl: "https://adventureenglish.com/en/login",
 		});
 
 		return reply.send({

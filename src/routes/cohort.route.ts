@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
 import { bookSessionForUser, createCohort, createSession, enrollUserInCohort, listCohortsByCourse, listSessionsByCohort } from "../services/cohort.service";
 import { requireRole, verifyAuthToken } from "../utils/auth";
+import { sendSessionBookedEmail } from "../services/mail.service";
 
 const courseIdParamSchema = {
 	type: "object",
@@ -208,6 +209,16 @@ export default async function cohortRoutes(app: FastifyInstance) {
 			if (!email) return reply.status(401).send({ message: "Unauthorized" });
 			const success = await bookSessionForUser(email, request.params.cohortId, request.params.sessionId);
 			if (!success) return reply.status(409).send({ message: "Unable to book session" });
+
+			const sessions = await listSessionsByCohort(request.params.cohortId);
+			const session = sessions.find((row) => row.sessionId === request.params.sessionId);
+			void sendSessionBookedEmail({
+				to: email,
+				cohortId: request.params.cohortId,
+				sessionId: request.params.sessionId,
+				sessionStartsAt: session?.startsAt,
+			});
+
 			return reply.send({ success: true });
 		},
 	);

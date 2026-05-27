@@ -19,6 +19,7 @@ import {
 import { requireRole, verifyAuthToken } from "../utils/auth";
 import { redactInteractiveCheckpointsOnCourse } from "../utils/interactive-checkpoint";
 import { logCourseMutationBody } from "../utils/log-course-body";
+import { sendEnrollmentGrantedEmail } from "../services/mail.service";
 
 const courseQuestionSchema = {
 	type: "object",
@@ -813,6 +814,18 @@ export default async function courseRoutes(app: FastifyInstance) {
 				if (!updatedUser) {
 					return reply.status(404).send({ message: "User or course not found" });
 				}
+
+				const course = await getCourseById(request.params.courseId);
+				const canonicalCourseId = course?.courseId ?? course?.id ?? request.params.courseId;
+				const enrollment = (updatedUser.enrollments ?? []).find(
+					(row) => row.courseId === canonicalCourseId,
+				);
+				void sendEnrollmentGrantedEmail({
+					to: updatedUser.email,
+					courseTitle: course?.title ?? canonicalCourseId,
+					accessExpiresAt: enrollment?.accessExpiresAt,
+					courseUrl: `https://adventureenglish.com/en/courses/${encodeURIComponent(canonicalCourseId)}`,
+				});
 
 				return reply.send(updatedUser);
 			} catch (error) {
