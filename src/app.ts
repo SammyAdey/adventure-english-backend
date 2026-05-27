@@ -12,6 +12,7 @@ import calIntegrationRoutes from './routes/integrations.cal.route';
 import cloudinaryIntegrationRoutes from "./routes/integrations.cloudinary.route";
 import stripeIntegrationRoutes from "./routes/integrations.stripe.route";
 import dashboardRoutes from "./routes/dashboard.route";
+import publicRoutes from "./routes/public.route";
 import { runMigrations } from "./migrations/run-migrations";
 
 const app = Fastify({ logger: true });
@@ -63,6 +64,7 @@ app.register(cors, {
 	maxAge: 86400,
 });
 app.register(rootRoute);
+app.register(publicRoutes);
 app.register(authRoutes);
 app.register(courseRoutes);
 app.register(userRoutes);
