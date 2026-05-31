@@ -179,6 +179,87 @@ export const listSessionsByCohort = async (cohortId: string): Promise<SessionDTO
 	return sessions.filter((s): s is MongoSession & { _id: ObjectId } => Boolean(s._id)).map(mapSession);
 };
 
+export const deleteCohortSession = async (cohortId: string, sessionId: string): Promise<boolean> => {
+	const db = await connectToDatabase();
+	initSessionCollection(db);
+	initAttendanceCollection(db);
+	const sessionCollection = getSessionCollection();
+	const attendanceCollection = getAttendanceCollection();
+
+	const session = await sessionCollection.findOne({ cohortId, sessionId });
+	if (!session || !session._id) return false;
+
+	await sessionCollection.deleteOne({ _id: session._id });
+	await attendanceCollection.deleteMany({ cohortId, sessionId });
+	return true;
+};
+
+export const deleteCohortById = async (cohortId: string): Promise<boolean> => {
+	const db = await connectToDatabase();
+	initCohortCollection(db);
+	initSessionCollection(db);
+	initAttendanceCollection(db);
+	initUserCollection(db);
+	const cohortCollection = getCohortCollection();
+	const sessionCollection = getSessionCollection();
+	const attendanceCollection = getAttendanceCollection();
+	const usersCollection = getUserCollection();
+
+	const cohort = await cohortCollection.findOne({ cohortId });
+	if (!cohort || !cohort._id) return false;
+
+	await sessionCollection.deleteMany({ cohortId });
+	await attendanceCollection.deleteMany({ cohortId });
+
+	const users = await usersCollection
+		.find(
+			{ "enrollments.cohortId": cohortId },
+			{ projection: { _id: 1, enrollments: 1, enrolledCourseCount: 1 } },
+		)
+		.toArray();
+
+	for (const user of users) {
+		if (!user._id) continue;
+		const removedCount = (user.enrollments ?? []).filter((entry) => entry.cohortId === cohortId).length;
+		if (removedCount <= 0) continue;
+		const current = typeof user.enrolledCourseCount === "number" ? user.enrolledCourseCount : 0;
+		await usersCollection.updateOne(
+			{ _id: user._id },
+			{
+				$pull: { enrollments: { cohortId } },
+				$set: {
+					updatedAt: new Date(),
+					enrolledCourseCount: Math.max(0, current - removedCount),
+				},
+			},
+		);
+	}
+
+	await cohortCollection.deleteOne({ _id: cohort._id });
+
+	const course = await findCourseByIdentifier(cohort.courseId);
+	if (course && (course.maxEnrollments ?? 0) > 0) {
+		const cohortAgg = await cohortCollection
+			.aggregate<{ total: number }>([
+				{ $match: { courseId: cohort.courseId } },
+				{ $group: { _id: null, total: { $sum: "$enrollmentCount" } } },
+			])
+			.toArray();
+		const totalEnrolled = cohortAgg[0]?.total ?? 0;
+		await db.collection<MongoCourse>("courses").updateOne(
+			{ _id: course._id },
+			{
+				$set: {
+					isSoldOut: totalEnrolled >= (course.maxEnrollments ?? 0),
+					updatedAt: new Date(),
+				},
+			},
+		);
+	}
+
+	return true;
+};
+
 export const enrollUserInCohort = async (courseId: string, cohortId: string, userEmail: string): Promise<boolean> => {
 	const db = await connectToDatabase();
 	initCohortCollection(db);

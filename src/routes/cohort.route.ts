@@ -1,5 +1,14 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
-import { bookSessionForUser, createCohort, createSession, enrollUserInCohort, listCohortsByCourse, listSessionsByCohort } from "../services/cohort.service";
+import {
+	bookSessionForUser,
+	createCohort,
+	createSession,
+	deleteCohortById,
+	deleteCohortSession,
+	enrollUserInCohort,
+	listCohortsByCourse,
+	listSessionsByCohort,
+} from "../services/cohort.service";
 import { requireRole, verifyAuthToken } from "../utils/auth";
 import { sendSessionBookedEmail } from "../services/mail.service";
 
@@ -29,6 +38,15 @@ const enrollParamsSchema = {
 } as const;
 
 const bookSessionParamsSchema = {
+	type: "object",
+	required: ["cohortId", "sessionId"],
+	properties: {
+		cohortId: { type: "string", minLength: 1 },
+		sessionId: { type: "string", minLength: 1 },
+	},
+} as const;
+
+const deleteSessionParamsSchema = {
 	type: "object",
 	required: ["cohortId", "sessionId"],
 	properties: {
@@ -167,6 +185,38 @@ export default async function cohortRoutes(app: FastifyInstance) {
 			if (!roleContext) return;
 			const sessions = await listSessionsByCohort(request.params.cohortId);
 			return reply.send({ sessions });
+		},
+	);
+
+	app.delete(
+		"/cohorts/:cohortId",
+		{
+			schema: {
+				params: cohortIdParamSchema,
+			},
+		},
+		async (request: FastifyRequest<{ Params: { cohortId: string } }>, reply) => {
+			const roleContext = await requireRole(app, request, reply, ["admin", "instructor"]);
+			if (!roleContext) return;
+			const removed = await deleteCohortById(request.params.cohortId);
+			if (!removed) return reply.status(404).send({ message: "Cohort not found" });
+			return reply.status(204).send();
+		},
+	);
+
+	app.delete(
+		"/cohorts/:cohortId/sessions/:sessionId",
+		{
+			schema: {
+				params: deleteSessionParamsSchema,
+			},
+		},
+		async (request: FastifyRequest<{ Params: { cohortId: string; sessionId: string } }>, reply) => {
+			const roleContext = await requireRole(app, request, reply, ["admin", "instructor"]);
+			if (!roleContext) return;
+			const removed = await deleteCohortSession(request.params.cohortId, request.params.sessionId);
+			if (!removed) return reply.status(404).send({ message: "Session not found" });
+			return reply.status(204).send();
 		},
 	);
 
