@@ -466,10 +466,11 @@ export default async function userRoutes(app: FastifyInstance) {
 								type: "array",
 								items: {
 									type: "object",
-									required: ["id", "title", "dateLabel", "timeLabel", "mode"],
+									required: ["id", "title", "startsAt", "dateLabel", "timeLabel", "mode"],
 									properties: {
 										id: { type: "string" },
 										title: { type: "string" },
+										startsAt: { type: "string", format: "date-time" },
 										dateLabel: { type: "string" },
 										timeLabel: { type: "string" },
 										mode: { type: "string", enum: ["Video", "Tutoring"] },

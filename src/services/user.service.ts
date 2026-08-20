@@ -316,6 +316,7 @@ type DashboardSummary = {
 	upcomingBookings: Array<{
 		id: string;
 		title: string;
+		startsAt: string;
 		dateLabel: string;
 		timeLabel: string;
 		mode: "Video" | "Tutoring";
@@ -365,6 +366,7 @@ export const getUserDashboardSummary = async (email: string): Promise<DashboardS
 	const upcomingBookings = upcomingSessionDocs.map((session) => ({
 		id: `${session.cohortId}-${session.startsAt.toISOString()}`,
 		title: "Tutoring session",
+		startsAt: session.startsAt.toISOString(),
 		dateLabel: session.startsAt.toLocaleDateString("en-AU", {
 			weekday: "short",
 			day: "numeric",
